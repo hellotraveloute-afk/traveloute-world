@@ -58,12 +58,17 @@ python3 -m http.server 8080
 
 Open <http://localhost:8080>. GPS mode only works on `https://` or `localhost`.
 
+## Inside the Traveloute app
+
+The app loads this page with `?embed=1`. In that mode the web HUD is hidden, the app sends the GPS position, and the two talk through a small JSON bridge. The messages are listed in [`docs/BRIDGE.md`](docs/BRIDGE.md). Pushing to `main` updates the world in the app on its next launch, without an app release.
+
 ## Project layout
 
 ```
 index.html        page, HUD markup, library import map
 css/style.css     all styling
-js/main.js        start screen, game loop, input, claiming, scanning
+js/main.js        start screen, game loop, input, claiming, scanning, app commands
+js/bridge.js      messages to and from the Traveloute app (embed mode)
 js/rules.js       THE RULES: how map data looks and plays (edit this to restyle the world)
 js/tiles.js       downloads tiles and builds terrain, ground texture, trees, buildings, places
 js/landmarks.js   crystals, discovery, labels
@@ -75,6 +80,7 @@ js/config.js      technical settings, start presets, graphics quality
 js/hud.js         toasts, rewards, stamp modal, sheets, sound
 js/storage.js     saving progress in the browser
 docs/PLAN.md      the master plan
+docs/BRIDGE.md    the app bridge protocol
 ```
 
 ## Changing how the world looks

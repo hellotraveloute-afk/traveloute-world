@@ -185,3 +185,9 @@ a { color: var(--mint); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* ---------- embed mode (inside the Traveloute app, ?embed=1): the app draws the HUD */
+body.embed .hud-top, body.embed .dock, body.embed .context, body.embed .toasts, body.embed .sheet,
+body.embed .modal, body.embed .hint, body.embed .quests, body.embed .status, body.embed .start,
+body.embed .loader, body.embed .levelup, body.embed .fly { display: none !important; }
+body.embed .attrib { bottom: 2px; font-size: 9px; }

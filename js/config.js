@@ -30,9 +30,10 @@ export const PRESETS = [
   { key: 'mirissa', name: 'Mirissa', sub: 'Beach town', lat: 5.9483, lon: 80.4716 },
 ];
 
-// Picks graphics settings for the device. Override with ?quality=low or ?quality=high.
-export function detectQuality() {
-  const param = new URLSearchParams(location.search).get('quality');
+// Picks graphics settings for the device. Override with ?quality=low or ?quality=high,
+// or (in the app) with the `quality` field of the `start` message.
+export function detectQuality(override) {
+  const param = override || new URLSearchParams(location.search).get('quality');
   const mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
   const memory = navigator.deviceMemory || 8;
   const cores = navigator.hardwareConcurrency || 8;
