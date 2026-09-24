@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0A1220">
+  <title>Traveloute World</title>
+  <meta name="description" content="A game world built from the real map. Explore, uncover the fog, and claim stars at real places.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Nunito:wght@600;700;800;900&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+      "pbf": "https://cdn.jsdelivr.net/npm/pbf@3.2.1/+esm",
+      "@mapbox/vector-tile": "https://cdn.jsdelivr.net/npm/@mapbox/vector-tile@1.3.1/+esm"
+    }
+  }
+  </script>
+</head>
+<body>
+<div id="app">
+  <canvas id="scene" aria-label="3D game world built from the real map. Tap the ground to walk, drag to look around."></canvas>
+  <div id="labels" aria-hidden="true"></div>
+
+  <header class="hud-top" id="hud" hidden>
+    <button class="profile" id="profileBtn" aria-label="Open your passport">
+      <span class="portrait">
+        <svg viewBox="0 0 56 56" width="54" height="54" aria-hidden="true"><circle cx="28" cy="28" r="25" class="ring-bg"></circle><circle id="xpRing" cx="28" cy="28" r="25" class="ring-fg" stroke-dasharray="157.1" stroke-dashoffset="157.1"></circle></svg>
+        <span class="face">YOU</span>
+        <span class="lv" id="lvBadge">1</span>
+      </span>
+      <span class="pinfo"><span class="pname">Explorer</span><span class="ptitle" id="ptitle">Newcomer</span></span>
+    </button>
+    <div class="right-col">
+      <div class="stars" id="starsPill" aria-label="Travel stars">
+        <svg id="starIcon" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path fill="#FFC857" stroke="#B36A00" stroke-width="1.2" stroke-linejoin="round" d="M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.3l-5.9 3.2 1.2-6.5L2.5 9.4l6.6-.9z"></path></svg>
+        <span id="starCount">0</span>
+      </div>
+      <div class="row-btns">
+        <button class="iconbtn wide" id="modeBtn" aria-label="Switch mode">Explore</button>
+        <button class="iconbtn" id="timeBtn" aria-label="Change time of day"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FFF8EC" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 3v2M12 19v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M3 12h2M19 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"></path><circle cx="12" cy="12" r="4"></circle></svg></button>
+        <button class="iconbtn" id="soundBtn" aria-label="Mute sound" aria-pressed="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FFF8EC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" id="soundIcon"><path d="M4 9h4l5-4v14l-5-4H4z"></path><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"></path></svg></button>
+        <button class="iconbtn" id="compassBtn" aria-label="Face north"><svg id="compassIcon" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9.5" fill="none" stroke="#FFF8EC" stroke-width="1.6"></circle><path d="M12 4.5l3 7.5h-6z" fill="#FF7A59"></path><path d="M12 19.5l-3-7.5h6z" fill="#B7C4D2"></path></svg></button>
+        <button class="iconbtn" id="placeBtn" aria-label="Choose another place"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FFF8EC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11z"></path><circle cx="12" cy="10" r="2.5"></circle></svg></button>
+      </div>
+    </div>
+  </header>
+
+  <section class="quests" id="quests" aria-label="How to play" hidden>
+    <button class="quests-head" id="questToggle" aria-expanded="true"><span class="display">How to play</span><small>tap to hide</small></button>
+    <div class="quests-body">
+      <p><b>Walk</b> to clear the fog. Hidden places show as purple crystals.</p>
+      <p><b>Get close</b> to a glowing crystal and press <b>Claim</b>.</p>
+      <p><b>Scan</b> points you toward hidden places nearby.</p>
+      <p><b>Explore mode:</b> tap the ground to walk. <b>GPS mode:</b> walk in real life.</p>
+    </div>
+  </section>
+
+  <div class="status" id="status" hidden></div>
+  <div class="context" id="context" aria-live="polite"></div>
+
+  <div class="hint" id="hint" hidden><span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#5CE1C6" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><circle cx="12" cy="12" r="8" opacity=".5"></circle></svg>Tap ground to walk</span><span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#5CE1C6" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 12h16M7 9l-3 3 3 3M17 9l3 3-3 3"></path></svg>Drag to look</span></div>
+
+  <nav class="dock" id="dock" aria-label="Main" hidden>
+    <button class="tab" data-tab="nearby"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M15.5 8.5l-2 5-5 2 2-5z"></path></svg>Nearby</button>
+    <button class="tab" data-tab="passport"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"></rect><circle cx="12" cy="10" r="3"></circle><path d="M9 16h6"></path></svg>Passport</button>
+    <button class="action scan" id="actionBtn">SCAN</button>
+    <button class="tab" data-tab="explored"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"></path><circle cx="12" cy="12" r="3"></circle></svg>Explored</button>
+    <button class="tab" data-tab="none" disabled aria-hidden="true" tabindex="-1"></button>
+  </nav>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <div class="sheet" id="sheet" role="dialog" aria-label="Details"><div class="grab"></div><div id="sheetBody"></div></div>
+  <div class="modal" id="modal" hidden></div>
+
+  <div class="attrib">Map data © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors · Tiles <a href="https://openfreemap.org" target="_blank" rel="noopener">OpenFreeMap</a> · Elevation <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank" rel="noopener">Terrain Tiles on AWS</a></div>
+
+  <section class="start" id="start">
+    <div class="start-inner">
+      <div class="logo">TRAVELOUTE</div>
+      <p class="tagline">A game world built from the real map.</p>
+      <button class="big-btn" id="gpsStart">Use my location</button>
+      <p class="start-error" id="startError" role="alert"></p>
+      <div class="divider"><span>or jump to a place</span></div>
+      <div class="preset-grid" id="presetGrid"></div>
+      <form class="coord-form" id="coordForm">
+        <label for="coordInput">Or enter coordinates</label>
+        <div class="coord-row"><input id="coordInput" inputmode="decimal" placeholder="6.8667, 81.0466" autocomplete="off"><button type="submit">Go</button></div>
+      </form>
+      <p class="quality" id="qualityNote"></p>
+    </div>
+  </section>
+
+  <div class="loader" id="loader" hidden><div class="loader-inner"><div class="logo">TRAVELOUTE</div><p id="loaderText">Building the world…</p><div class="bar"><div class="fill"></div></div></div></div>
+</div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
