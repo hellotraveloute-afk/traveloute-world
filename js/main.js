@@ -1,4 +1,9 @@
 // Traveloute World: boots a session, runs the game loop and handles input.
+//
+// Two ways to run:
+//   - In a browser: the web HUD, start screen and browser GPS are used.
+//   - Inside the app (?embed=1): the app draws the HUD, owns the GPS and the
+//     game rules, and talks to the world through js/bridge.js.
 
 import * as THREE from 'three';
 import { CONFIG, PRESETS, detectQuality } from './config.js';
@@ -11,12 +16,15 @@ import { makeAvatar, animateAvatar } from './avatar.js';
 import { GAMEPLAY, TIMES, timeIndexForHour, titleFor } from './rules.js';
 import { store } from './storage.js';
 import * as hud from './hud.js';
+import * as bridge from './bridge.js';
 import { clamp, lerp, fmt, escapeHtml } from './util.js';
 
 const $ = hud.$;
-const quality = detectQuality();
+const EMBED = bridge.EMBED;
+let quality = detectQuality();
 const profile = store.get('profile', { stars: 0, xp: 0, level: 1, stamps: [] });
-const claims = store.get('claims', {});
+// In the app, claims (and their cooldowns) come from the app with `setClaimed`.
+const claims = EMBED ? {} : store.get('claims', {});
 
 let proj, fog, world, tiles, landmarks, player;
 let mode = 'explore';
@@ -24,11 +32,14 @@ let timeIndex = 1;
 let gpsWatch = null;
 let gpsTarget = null;
 let gpsAccuracy = null;
+let pendingFix = null;
 let moveTarget = null;
 let busy = false;
 let started = false;
+let hudLive = false;
 let lastStamp = new THREE.Vector3(1e9, 0, 0);
 let tileTimer = 0;
+let lastStatusKey = '';
 let saveTimer = 0;
 let scanUntil = 0;
 let gpsTapHintShown = false;
@@ -99,10 +110,11 @@ function renderStart() {
 
 /* ======================================================= session */
 
-async function startSession(lat, lon, startMode) {
+async function startSession(lat, lon, startMode, qualityOverride) {
   if (started) return;
   started = true;
   mode = startMode;
+  if (qualityOverride) quality = detectQuality(qualityOverride);
   $('#start').hidden = true;
   $('#loader').hidden = false;
   $('#loaderText').textContent = 'Downloading the map around you…';
@@ -114,6 +126,7 @@ async function startSession(lat, lon, startMode) {
   } catch (e) {
     console.error(e);
     $('#loaderText').textContent = 'This device or browser does not support WebGL, which the 3D world needs.';
+    if (EMBED) bridge.send({ type: 'error', message: 'This device does not support WebGL, which the 3D world needs.', fatal: true });
     return;
   }
   landmarks = new Landmarks({
@@ -122,8 +135,9 @@ async function startSession(lat, lon, startMode) {
     fog,
     claims,
     onDiscover: (it) => {
-      hud.toast(`Discovered <b>${escapeHtml(it.p.name)}</b>`, it.p.color, 'eye');
       hud.sfx('discover');
+      if (EMBED) bridge.send({ type: 'discovered', place: bridge.placeJson(it) });
+      else hud.toast(`Discovered <b>${escapeHtml(it.p.name)}</b>`, it.p.color, 'eye');
     },
   });
   tiles = new TileManager({
@@ -133,7 +147,15 @@ async function startSession(lat, lon, startMode) {
     fog,
     onPlacesAdded: (k, places) => landmarks.add(k, places),
     onPlacesRemoved: (k) => landmarks.remove(k),
-    onStatus: (ready, total) => hud.setStatus(ready < total ? `Building world ${ready}/${total}` : null),
+    onStatus: (ready, total) => {
+      hud.setStatus(ready < total ? `Building world ${ready}/${total}` : null);
+      const key = `${ready}/${total}`;
+      if (EMBED && key !== lastStatusKey) {
+        lastStatusKey = key;
+        bridge.send({ type: 'status', tilesReady: ready, tilesTotal: total });
+      }
+    },
+    onError: (message) => EMBED && bridge.send({ type: 'error', message }),
   });
   const hasMap = await tiles.init();
 
@@ -167,6 +189,11 @@ async function startSession(lat, lon, startMode) {
   timeIndex = timeIndexForHour(h.getHours() + h.getMinutes() / 60);
   world.setTime(timeIndex, true);
 
+  if (pendingFix) {
+    applyFix(pendingFix);
+    pendingFix = null;
+  }
+
   fog.stamp(0, 0, GAMEPLAY.revealRadius * 1.8);
   tiles.update(0, 0);
   addEventListener('resize', () => world.resize());
@@ -185,12 +212,18 @@ async function startSession(lat, lon, startMode) {
   cam.target.copy(player.position);
   $('#loader').classList.add('done');
   setTimeout(() => ($('#loader').hidden = true), 700);
-  for (const id of ['hud', 'dock', 'quests']) $('#' + id).hidden = false;
-  $('#hint').hidden = mode === 'gps';
-  hud.setStars(profile.stars);
-  refreshProfile();
-  updateModeButton();
-  if (!hasMap) hud.toast('Map details could not load, so only terrain is shown. Check your connection and reload.', '#FF7A59', 'alert');
+  hudLive = true;
+  if (EMBED) {
+    bridge.send({ type: 'worldReady', timeIndex });
+    if (!hasMap) bridge.send({ type: 'error', message: 'Map details could not load, so only terrain is shown.' });
+  } else {
+    for (const id of ['hud', 'dock', 'quests']) $('#' + id).hidden = false;
+    $('#hint').hidden = mode === 'gps';
+    hud.setStars(profile.stars);
+    refreshProfile();
+    updateModeButton();
+    if (!hasMap) hud.toast('Map details could not load, so only terrain is shown. Check your connection and reload.', '#FF7A59', 'alert');
+  }
   if (mode === 'gps') startGps();
 }
 
@@ -204,7 +237,9 @@ function saveProfile() {
 
 /* ======================================================= GPS */
 
+// In the app the position comes from `setPlayer`; the browser is never asked.
 function startGps() {
+  if (EMBED) return;
   if (!navigator.geolocation) {
     hud.toast('Location is not available in this browser.', '#FF7A59', 'alert');
     setMode('explore');
@@ -212,11 +247,7 @@ function startGps() {
   }
   if (gpsWatch !== null) return;
   gpsWatch = navigator.geolocation.watchPosition(
-    (pos) => {
-      const w = proj.toWorld(pos.coords.latitude, pos.coords.longitude);
-      gpsTarget = new THREE.Vector3(w.x, 0, w.z);
-      gpsAccuracy = pos.coords.accuracy;
-    },
+    (pos) => applyFix({ lat: pos.coords.latitude, lon: pos.coords.longitude, accuracyM: pos.coords.accuracy }),
     (err) => {
       hud.toast(err.code === 1 ? 'Location permission denied. Switched to Explore mode.' : 'Lost your location. Switched to Explore mode.', '#FF7A59', 'alert');
       setMode('explore');
@@ -229,16 +260,23 @@ function stopGps() {
   gpsWatch = null;
   gpsTarget = null;
 }
+function applyFix({ lat, lon, accuracyM }) {
+  const w = proj.toWorld(lat, lon);
+  gpsTarget = new THREE.Vector3(w.x, 0, w.z);
+  gpsAccuracy = Number.isFinite(accuracyM) ? accuracyM : null;
+}
 function setMode(m) {
+  if (m !== 'gps' && m !== 'explore') return;
   mode = m;
+  if (!started || !destMarker) return;
   if (m === 'gps') {
     moveTarget = null;
     destMarker.visible = false;
     startGps();
-    hud.toast('GPS mode: walk in real life to move', '#5CE1C6', 'pin');
+    if (!EMBED) hud.toast('GPS mode: walk in real life to move', '#5CE1C6', 'pin');
   } else {
     stopGps();
-    hud.toast('Explore mode: tap the ground to walk', '#5CE1C6', 'pin');
+    if (!EMBED) hud.toast('Explore mode: tap the ground to walk', '#5CE1C6', 'pin');
   }
   updateModeButton();
 }
@@ -336,8 +374,9 @@ function tapAt(x, y) {
   const hitCrystal = raycaster.intersectObjects(landmarks.crystals(), false)[0];
   let target;
   if (hitCrystal) {
-    const p = hitCrystal.object.userData.item.p;
-    target = new THREE.Vector3(p.x + 6, 0, p.z + 6);
+    const item = hitCrystal.object.userData.item;
+    if (EMBED) bridge.send({ type: 'placeTapped', place: bridge.placeJson(item) });
+    target = new THREE.Vector3(item.p.x + 6, 0, item.p.z + 6);
   } else {
     const meshes = [...tiles.tiles.values()].filter((t) => t.terrain && t.state === 'ready').map((t) => t.terrain);
     const hit = raycaster.intersectObjects(meshes, false)[0];
@@ -345,7 +384,7 @@ function tapAt(x, y) {
     target = hit.point;
   }
   if (mode === 'gps') {
-    if (!gpsTapHintShown) {
+    if (!gpsTapHintShown && !EMBED) {
       hud.toast('In GPS mode you move by walking. Switch to Explore to tap-walk.', '#5CE1C6', 'pin');
       gpsTapHintShown = true;
     }
@@ -361,8 +400,12 @@ function walkTo(x, z) {
   hud.sfx('tap');
   $('#hint').classList.add('gone');
 }
+function walkToPlace(item) {
+  if (mode === 'gps') setMode('explore');
+  walkTo(item.p.x + 6, item.p.z + 6);
+}
 
-/* ======================================================= HUD buttons */
+/* ======================================================= HUD buttons (browser only) */
 
 $('#actionBtn').addEventListener('click', () => {
   hud.ensureAudio();
@@ -371,21 +414,21 @@ $('#actionBtn').addEventListener('click', () => {
   else scan();
 });
 $('#timeBtn').addEventListener('click', () => {
-  timeIndex = (timeIndex + 1) % TIMES.length;
-  world.setTime(timeIndex);
+  setTime((timeIndex + 1) % TIMES.length);
   hud.toast(TIMES[timeIndex].name, '#FFC857', 'sun');
   hud.sfx('tap');
 });
 let soundOn = true;
-$('#soundBtn').addEventListener('click', () => {
-  soundOn = !soundOn;
+function setSound(on) {
+  soundOn = on;
   hud.setSound(soundOn);
   $('#soundBtn').setAttribute('aria-pressed', String(soundOn));
   $('#soundBtn').setAttribute('aria-label', soundOn ? 'Mute sound' : 'Turn sound on');
   $('#soundIcon').innerHTML = soundOn
     ? '<path d="M4 9h4l5-4v14l-5-4H4z"></path><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"></path>'
     : '<path d="M4 9h4l5-4v14l-5-4H4z"></path><path d="M17 9l5 6M22 9l-5 6"></path>';
-});
+}
+$('#soundBtn').addEventListener('click', () => setSound(!soundOn));
 $('#compassBtn').addEventListener('click', () => {
   cam.yaw = 0;
   hud.sfx('tap');
@@ -403,6 +446,11 @@ $('#questToggle').addEventListener('click', () => {
 if (innerWidth < 520) {
   $('#quests').classList.add('collapsed');
   $('#questToggle').setAttribute('aria-expanded', 'false');
+}
+
+function setTime(idx) {
+  timeIndex = ((idx % TIMES.length) + TIMES.length) % TIMES.length;
+  if (world) world.setTime(timeIndex);
 }
 
 document.querySelectorAll('.dock .tab').forEach((b) =>
@@ -427,8 +475,7 @@ $('#sheet').addEventListener('click', (e) => {
   if (go) {
     const it = landmarks.items.get(go.dataset.go);
     if (it) {
-      if (mode === 'gps') setMode('explore');
-      walkTo(it.p.x + 6, it.p.z + 6);
+      walkToPlace(it);
       hud.closeSheet();
     }
   }
@@ -475,20 +522,29 @@ function claimable() {
   return landmarks.nearest(player.position, claimRadius(), (it) => it.status === 'open');
 }
 
-function claim(item) {
-  if (busy) return;
-  busy = true;
+// The visual part of a claim: mark the crystal, clear fog, sound and star burst.
+// Returns the screen point of the burst.
+function playClaimEffect(item) {
   const p = item.p;
   landmarks.claim(item);
-  profile.stars += p.stars;
-  profile.stamps.push({ id: p.id, name: p.name, kind: p.kind, rarity: p.rarity, color: p.color, at: Date.now() });
-  saveProfile();
   fog.stamp(p.x, p.z, GAMEPLAY.revealOnClaim);
   hud.sfx('claim');
   const at = new THREE.Vector3(p.x, p.y + 12, p.z);
   burst(at, p.color);
   const sp = at.clone().project(world.camera);
-  hud.flyStars((sp.x * 0.5 + 0.5) * innerWidth, (-sp.y * 0.5 + 0.5) * innerHeight, () => hud.setStars(profile.stars, true));
+  return { x: (sp.x * 0.5 + 0.5) * innerWidth, y: (-sp.y * 0.5 + 0.5) * innerHeight };
+}
+
+// Browser-only claim: the page keeps its own stars, stamps and XP.
+function claim(item) {
+  if (busy) return;
+  busy = true;
+  const p = item.p;
+  const sp = playClaimEffect(item);
+  profile.stars += p.stars;
+  profile.stamps.push({ id: p.id, name: p.name, kind: p.kind, rarity: p.rarity, color: p.color, at: Date.now() });
+  saveProfile();
+  hud.flyStars(sp.x, sp.y, () => hud.setStars(profile.stars, true));
   setTimeout(
     () =>
       hud.stampModal(p, p.stars, GAMEPLAY.xpPerClaim, () => {
@@ -512,9 +568,12 @@ function addXp(n) {
   if (leveled) hud.levelUp(profile.level, titleFor(profile.level));
 }
 
-function scan() {
-  if (performance.now() < scanUntil) return;
-  scanUntil = performance.now() + GAMEPLAY.scanCooldownMs;
+const DIRECTIONS = ['behind you', 'behind-right', 'to the right', 'ahead-right', 'ahead', 'ahead-left', 'to the left', 'behind-left'];
+
+// Plays the scan pulse and finds the nearest hidden place.
+// Returns { found, item?, d?, direction?, bearing? }. When nothing hidden is
+// near, `item` is the nearest open place (if any) so the player gets a hint.
+function runScan() {
   scanRing.userData = { t: 0, x: player.position.x, z: player.position.z };
   hud.sfx('scan');
   const near = landmarks.nearest(player.position, GAMEPLAY.scanRange, (it) => it.status === 'mystery');
@@ -523,13 +582,21 @@ function scan() {
     const dz = near.item.p.z - player.position.z;
     // direction relative to where the camera is looking
     const ang = Math.atan2(dx, dz) - cam.yaw;
-    const dirs = ['behind you', 'behind-right', 'to the right', 'ahead-right', 'ahead', 'ahead-left', 'to the left', 'behind-left'];
     const idx = ((Math.round(ang / (Math.PI / 4)) % 8) + 8) % 8;
-    hud.toast(`Something hidden <b>${fmtDist(near.d)}</b> ${dirs[idx]}`, '#B69CFF', 'radar');
-  } else {
-    const open = landmarks.nearest(player.position, GAMEPLAY.scanRange, (it) => it.status === 'open');
-    hud.toast(open ? `Nothing hidden nearby. <b>${escapeHtml(open.item.p.name)}</b> is ${fmtDist(open.d)} away.` : 'Nothing found nearby. Try another direction.', '#5CE1C6', 'radar');
+    // compass bearing: +x is east, -z is north
+    const bearing = (((Math.atan2(dx, -dz) * 180) / Math.PI) + 360) % 360;
+    return { found: true, item: near.item, d: near.d, direction: DIRECTIONS[idx], bearing };
   }
+  const open = landmarks.nearest(player.position, GAMEPLAY.scanRange, (it) => it.status === 'open');
+  return open ? { found: false, item: open.item, d: open.d } : { found: false };
+}
+
+function scan() {
+  if (performance.now() < scanUntil) return;
+  scanUntil = performance.now() + GAMEPLAY.scanCooldownMs;
+  const r = runScan();
+  if (r.found) hud.toast(`Something hidden <b>${fmtDist(r.d)}</b> ${r.direction}`, '#B69CFF', 'radar');
+  else hud.toast(r.item ? `Nothing hidden nearby. <b>${escapeHtml(r.item.p.name)}</b> is ${fmtDist(r.d)} away.` : 'Nothing found nearby. Try another direction.', '#5CE1C6', 'radar');
 }
 const fmtDist = (d) => (d < 1000 ? `${Math.round(d)} m` : `${(d / 1000).toFixed(1)} km`);
 
@@ -587,6 +654,103 @@ function updateBursts(dt) {
       B.pts.material.dispose();
       bursts.splice(b, 1);
     }
+  }
+}
+
+/* ======================================================= context */
+
+// What the player is near right now: claim | claimed | near | none.
+function currentContext() {
+  const near = claimable();
+  if (near) return { kind: 'claim', item: near.item, d: near.d };
+  const claimed = landmarks.nearest(player.position, claimRadius(), (it) => it.status === 'claimed');
+  if (claimed) return { kind: 'claimed', item: claimed.item, d: claimed.d };
+  const close = landmarks.nearest(player.position, 160, (it) => it.status === 'open');
+  if (close) return { kind: 'near', item: close.item, d: close.d };
+  return { kind: 'none' };
+}
+
+function updateContext(ctx) {
+  if (ctx.kind === 'claim') {
+    const p = ctx.item.p;
+    hud.setAction('claim', `CLAIM\n★${p.stars}`);
+    hud.setContext(
+      `<div class="ctx-row"><span class="rar" style="background:${p.color}">${p.rarity.toUpperCase()}</span><span class="ctx-sub">${Math.round(ctx.d)} m away</span></div><div class="ctx-title">${escapeHtml(p.name)}</div><div class="ctx-sub" style="text-transform:capitalize">${escapeHtml(p.kind)} · ★${p.stars}</div>`,
+      'gold'
+    );
+    return;
+  }
+  hud.setAction('scan', 'SCAN');
+  if (ctx.kind === 'claimed') {
+    hud.setContext(`<div class="ctx-row"><span class="ctx-eyebrow" style="color:var(--muted)">CLAIMED</span></div><div class="ctx-title">${escapeHtml(ctx.item.p.name)}</div><div class="ctx-sub">Come back in 2 days to claim again.</div>`);
+    return;
+  }
+  if (ctx.kind === 'near') {
+    const p = ctx.item.p;
+    hud.setContext(
+      `<div class="ctx-row"><span class="rar" style="background:${p.color}">${p.rarity.toUpperCase()}</span><span class="ctx-sub">${Math.round(ctx.d)} m away</span></div><div class="ctx-title">${escapeHtml(p.name)}</div><div class="ctx-sub">Walk within ${claimRadius()} m to claim ★${p.stars}</div>`
+    );
+    return;
+  }
+  if (mode === 'gps' && gpsAccuracy && gpsAccuracy > 60) {
+    hud.setContext(`<div class="ctx-row"><span class="ctx-eyebrow" style="color:var(--coral)">WEAK GPS</span></div><div class="ctx-sub">Location accuracy is about ${Math.round(gpsAccuracy)} m. Claims work best outdoors.</div>`, 'coral');
+    return;
+  }
+  hud.setContext('');
+}
+
+// Sends `context` to the app only when the kind, the place, or the distance
+// (in 5 m steps) changes, and at most every 250 ms.
+let lastContextKey = '';
+let lastContextAt = 0;
+function reportContext(ctx) {
+  const now = performance.now();
+  if (now - lastContextAt < 250) return;
+  const key = `${ctx.kind}|${ctx.item ? ctx.item.p.id : ''}|${ctx.item ? Math.round(ctx.d / 5) : ''}`;
+  if (key === lastContextKey) return;
+  lastContextKey = key;
+  lastContextAt = now;
+  const msg = { type: 'context', kind: ctx.kind };
+  if (ctx.item) {
+    msg.place = bridge.placeJson(ctx.item);
+    msg.distanceM = Math.round(ctx.d);
+    msg.radiusM = claimRadius();
+  }
+  bridge.send(msg);
+}
+
+/* ---------- reports for the app: explored share and frame rate ---------- */
+let exploredTimer = 0;
+let lastExplored = -1;
+function reportExplored(dt) {
+  exploredTimer += dt;
+  if (exploredTimer < 3) return;
+  exploredTimer = 0;
+  const percent = Math.round(fog.percentAt(player.position.x, player.position.z) * 10) / 10;
+  if (percent === lastExplored) return;
+  lastExplored = percent;
+  bridge.send({ type: 'explored', percent });
+}
+
+// Average frame rate over 5 s windows, plus the worst 1 s inside the window.
+const fpsStats = { frames: 0, time: 0, secFrames: 0, secTime: 0, min: Infinity };
+function reportFps(rawDt) {
+  fpsStats.frames++;
+  fpsStats.time += rawDt;
+  fpsStats.secFrames++;
+  fpsStats.secTime += rawDt;
+  if (fpsStats.secTime >= 1) {
+    fpsStats.min = Math.min(fpsStats.min, fpsStats.secFrames / fpsStats.secTime);
+    fpsStats.secFrames = 0;
+    fpsStats.secTime = 0;
+  }
+  if (fpsStats.time >= 5) {
+    const value = Math.round((fpsStats.frames / fpsStats.time) * 10) / 10;
+    const min = Number.isFinite(fpsStats.min) ? Math.round(fpsStats.min * 10) / 10 : value;
+    bridge.send({ type: 'fps', value, min, quality: quality.level });
+    fpsStats.frames = 0;
+    fpsStats.time = 0;
+    fpsStats.min = Infinity;
   }
 }
 
@@ -680,40 +844,9 @@ function updateScanRing(dt) {
   scanRing.position.set(u.x, player.position.y + 3, u.z);
 }
 
-function updateContext() {
-  const near = claimable();
-  if (near) {
-    const p = near.item.p;
-    hud.setAction('claim', `CLAIM\n★${p.stars}`);
-    hud.setContext(
-      `<div class="ctx-row"><span class="rar" style="background:${p.color}">${p.rarity.toUpperCase()}</span><span class="ctx-sub">${Math.round(near.d)} m away</span></div><div class="ctx-title">${escapeHtml(p.name)}</div><div class="ctx-sub" style="text-transform:capitalize">${escapeHtml(p.kind)} · ★${p.stars}</div>`,
-      'gold'
-    );
-    return;
-  }
-  hud.setAction('scan', 'SCAN');
-  const claimed = landmarks.nearest(player.position, claimRadius(), (it) => it.status === 'claimed');
-  if (claimed) {
-    hud.setContext(`<div class="ctx-row"><span class="ctx-eyebrow" style="color:var(--muted)">CLAIMED</span></div><div class="ctx-title">${escapeHtml(claimed.item.p.name)}</div><div class="ctx-sub">Come back in 2 days to claim again.</div>`);
-    return;
-  }
-  const close = landmarks.nearest(player.position, 160, (it) => it.status === 'open');
-  if (close) {
-    const p = close.item.p;
-    hud.setContext(
-      `<div class="ctx-row"><span class="rar" style="background:${p.color}">${p.rarity.toUpperCase()}</span><span class="ctx-sub">${Math.round(close.d)} m away</span></div><div class="ctx-title">${escapeHtml(p.name)}</div><div class="ctx-sub">Walk within ${claimRadius()} m to claim ★${p.stars}</div>`
-    );
-    return;
-  }
-  if (mode === 'gps' && gpsAccuracy && gpsAccuracy > 60) {
-    hud.setContext(`<div class="ctx-row"><span class="ctx-eyebrow" style="color:var(--coral)">WEAK GPS</span></div><div class="ctx-sub">Location accuracy is about ${Math.round(gpsAccuracy)} m. Claims work best outdoors.</div>`, 'coral');
-    return;
-  }
-  hud.setContext('');
-}
-
 function frame() {
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const rawDt = clock.getDelta();
+  const dt = Math.min(rawDt, 0.05);
   const t = clock.elapsedTime;
   fog.uniforms.uTime.value = t;
   updatePlayer(dt, t);
@@ -728,7 +861,14 @@ function frame() {
   world.updateTime(dt);
   updateCamera(dt);
   world.follow(player.position);
-  if (!$('#hud').hidden) updateContext();
+  if (hudLive) {
+    const ctx = currentContext();
+    if (EMBED) {
+      reportContext(ctx);
+      reportExplored(dt);
+      reportFps(rawDt);
+    } else updateContext(ctx);
+  }
   saveTimer += dt * 1000;
   if (saveTimer > CONFIG.fogSaveIntervalMs) {
     saveTimer = 0;
@@ -743,4 +883,82 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden && fog) fog.save();
 });
 
-renderStart();
+/* ======================================================= app bridge (embed mode) */
+
+function initEmbed() {
+  document.body.classList.add('embed');
+  $('#start').hidden = true;
+
+  bridge.on('start', (m) => {
+    const lat = Number(m.lat);
+    const lon = Number(m.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 84 || Math.abs(lon) > 180) {
+      bridge.send({ type: 'error', message: 'Invalid start position.', fatal: true });
+      return;
+    }
+    hud.ensureAudio();
+    const q = m.quality === 'low' || m.quality === 'high' ? m.quality : undefined;
+    startSession(lat, lon, m.mode === 'gps' ? 'gps' : 'explore', q);
+  });
+  bridge.on('setPlayer', (m) => {
+    const fix = { lat: Number(m.lat), lon: Number(m.lon), accuracyM: Number(m.accuracyM) };
+    if (!Number.isFinite(fix.lat) || !Number.isFinite(fix.lon)) return;
+    if (proj) applyFix(fix);
+    else pendingFix = fix;
+  });
+  bridge.on('setMode', (m) => setMode(m.mode));
+  bridge.on('setTime', (m) => {
+    if (Number.isInteger(m.index)) setTime(m.index);
+    else if (typeof m.preset === 'string') {
+      const idx = TIMES.findIndex((x) => x.name.toLowerCase() === m.preset.toLowerCase());
+      if (idx >= 0) setTime(idx);
+    }
+  });
+  bridge.on('scan', () => {
+    if (!hudLive) return;
+    const r = runScan();
+    const msg = { type: 'scanResult', found: r.found };
+    if (r.item) {
+      msg.place = bridge.placeJson(r.item);
+      msg.distanceM = Math.round(r.d);
+    }
+    if (r.direction) {
+      msg.direction = r.direction;
+      msg.bearing = Math.round(r.bearing);
+    }
+    bridge.send(msg);
+  });
+  bridge.on('claimResult', (m) => {
+    if (!m.ok || typeof m.placeId !== 'string') return;
+    const item = landmarks && landmarks.items.get(m.placeId);
+    if (item) playClaimEffect(item);
+    else claims[m.placeId] = Date.now();
+  });
+  bridge.on('setClaimed', (m) => {
+    const ids = Array.isArray(m.ids) ? m.ids : [];
+    for (const k of Object.keys(claims)) delete claims[k];
+    const now = Date.now();
+    for (const id of ids) if (typeof id === 'string') claims[id] = now;
+  });
+  bridge.on('walkTo', (m) => {
+    const item = landmarks && landmarks.items.get(m.placeId);
+    if (item) walkToPlace(item);
+  });
+  bridge.on('faceNorth', () => {
+    cam.yaw = 0;
+  });
+  bridge.on('setSound', (m) => setSound(!!m.on));
+  bridge.on('listNearby', (m) => {
+    const limit = Number.isInteger(m.limit) ? clamp(m.limit, 1, 100) : 40;
+    const rows = player && landmarks ? landmarks.list(player.position).slice(0, limit) : [];
+    bridge.send({ type: 'nearby', places: rows.map(({ it, d }) => ({ ...bridge.placeJson(it), distanceM: Math.round(d) })) });
+  });
+
+  addEventListener('error', (e) => bridge.send({ type: 'error', message: String(e.message || 'Script error') }));
+  addEventListener('unhandledrejection', (e) => bridge.send({ type: 'error', message: String((e.reason && e.reason.message) || e.reason || 'Unhandled error') }));
+
+  bridge.send({ type: 'ready', protocol: bridge.PROTOCOL, version: bridge.VERSION });
+}
+
+if (EMBED) initEmbed();
+else renderStart();

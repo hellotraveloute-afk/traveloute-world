@@ -97,8 +97,8 @@ class Tile {
 }
 
 export class TileManager {
-  constructor({ scene, proj, quality, fog, onPlacesAdded, onPlacesRemoved, onStatus }) {
-    Object.assign(this, { scene, proj, quality, fog, onPlacesAdded, onPlacesRemoved, onStatus });
+  constructor({ scene, proj, quality, fog, onPlacesAdded, onPlacesRemoved, onStatus, onError }) {
+    Object.assign(this, { scene, proj, quality, fog, onPlacesAdded, onPlacesRemoved, onStatus, onError });
     this.tiles = new Map();
     this.queue = [];
     this.loading = 0;
@@ -166,6 +166,7 @@ export class TileManager {
           console.error('Tile failed', t.key, e);
           this.errors++;
           t.state = 'error';
+          this.onError && this.onError(`Tile ${t.key} failed: ${e && e.message ? e.message : e}`);
         })
         .finally(() => {
           this.loading--;
