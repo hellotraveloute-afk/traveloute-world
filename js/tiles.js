@@ -57,6 +57,30 @@ function toPolygons(rings) {
   return polys;
 }
 
+// Replaces single bad height samples (spikes or pits) with the median of their neighbours.
+function despike(h) {
+  const out = new Float32Array(h);
+  const nb = new Float32Array(8);
+  for (let y = 0; y < 256; y++) {
+    for (let x = 0; x < 256; x++) {
+      let n = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const xx = x + dx;
+          const yy = y + dy;
+          if (xx < 0 || yy < 0 || xx > 255 || yy > 255) continue;
+          nb[n++] = h[yy * 256 + xx];
+        }
+      }
+      const arr = Array.from(nb.subarray(0, n)).sort((a, b) => a - b);
+      const med = arr[n >> 1];
+      if (Math.abs(h[y * 256 + x] - med) > 40) out[y * 256 + x] = med;
+    }
+  }
+  return out;
+}
+
 class Tile {
   constructor(tx, ty, z) {
     this.tx = tx;
@@ -219,16 +243,28 @@ export class TileManager {
   async loadElevation(tx, ty, z) {
     const url = CONFIG.terrainUrl.replace('{z}', z).replace('{x}', tx).replace('{y}', ty);
     try {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.src = url;
-      await img.decode();
+      // Heights are stored in the pixel colours, so the browser must not colour-correct them:
+      // even a 1-step change in the red channel means a 256 m spike.
+      let source;
+      try {
+        const res = await fetch(url, { mode: 'cors' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        source = await createImageBitmap(await res.blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+      } catch {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.src = url;
+        await img.decode();
+        source = img;
+      }
       const { ctx } = makeCanvas(256, true);
-      ctx.drawImage(img, 0, 0, 256, 256);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(source, 0, 0, 256, 256);
+      if (source.close) source.close();
       const d = ctx.getImageData(0, 0, 256, 256).data;
-      const out = new Float32Array(256 * 256);
-      for (let i = 0; i < out.length; i++) out[i] = d[i * 4] * 256 + d[i * 4 + 1] + d[i * 4 + 2] / 256 - 32768;
-      return out;
+      const raw = new Float32Array(256 * 256);
+      for (let i = 0; i < raw.length; i++) raw[i] = d[i * 4] * 256 + d[i * 4 + 1] + d[i * 4 + 2] / 256 - 32768;
+      return despike(raw);
     } catch (e) {
       console.warn('Elevation tile failed', tx, ty, e);
       return null;
