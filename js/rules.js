@@ -171,6 +171,23 @@ export function classifyPlace(layer, p) {
   return null;
 }
 
+/* ---------- fog of war ---------- */
+// Unexplored land is covered by a drifting cloud veil. The veil is see-through
+// on purpose: the player should still make out hills, rivers and towns ahead.
+//   cloud / shadow  colours of the veil in daylight (other times: TIMES[].fow)
+//   veil            how much the cloud covers unexplored land (0 clear – 1 solid)
+//   edge            glow where fog is being cleared
+//   sparkle         burst colour when you clear fog
+//   billboards      soft cloud puffs floating over unexplored land (high quality)
+export const FOG = {
+  cloud: '#E9E6FF',
+  shadow: '#B9B2E8',
+  veil: 0.62,
+  edge: '#8FF0DC',
+  sparkle: '#C9B8FF',
+  billboards: { max: 20, size: [70, 130], height: [45, 80], spawnRadius: [170, 520] },
+};
+
 /* ---------- gameplay ---------- */
 export const GAMEPLAY = {
   claimRadius: { gps: 40, explore: 35 }, // metres
@@ -194,10 +211,10 @@ export function titleFor(level) {
 
 /* ---------- time of day ---------- */
 export const TIMES = [
-  { name: 'Dawn', top: '#34508E', hor: '#F7C49A', sunC: '#FFC89A', sunI: 1.5, dir: [0.9, 0.32, -0.2], hemiS: '#FFE0C8', hemiG: '#40583E', hemiI: 0.85, fow: '#1B2240', exp: 1.0, stars: 0, bloom: 0.5 },
-  { name: 'Day', top: '#3C8EE6', hor: '#C6E9F7', sunC: '#FFF4E0', sunI: 2.4, dir: [0.35, 1, 0.3], hemiS: '#DDF0FF', hemiG: '#5C7A48', hemiI: 1.05, fow: '#1D2A44', exp: 1.0, stars: 0, bloom: 0.32 },
-  { name: 'Golden hour', top: '#3A3F82', hor: '#F59F6E', sunC: '#FFB27A', sunI: 2.0, dir: [-0.85, 0.38, 0.25], hemiS: '#FFD9C0', hemiG: '#3A553A', hemiI: 0.9, fow: '#171C38', exp: 1.05, stars: 0.15, bloom: 0.55 },
-  { name: 'Night', top: '#050A1C', hor: '#1B2B4E', sunC: '#9DB4FF', sunI: 0.55, dir: [0.3, 0.8, -0.4], hemiS: '#6F86C8', hemiG: '#10182A', hemiI: 0.5, fow: '#060B16', exp: 0.95, stars: 1, bloom: 0.9 },
+  { name: 'Dawn', top: '#34508E', hor: '#F7C49A', sunC: '#FFC89A', sunI: 1.5, dir: [0.9, 0.32, -0.2], hemiS: '#FFE0C8', hemiG: '#40583E', hemiI: 0.85, fow: '#F3DCEB', exp: 1.0, stars: 0, bloom: 0.5 },
+  { name: 'Day', top: '#3C8EE6', hor: '#C6E9F7', sunC: '#FFF4E0', sunI: 2.4, dir: [0.35, 1, 0.3], hemiS: '#DDF0FF', hemiG: '#5C7A48', hemiI: 1.05, fow: '#E9E6FF', exp: 1.0, stars: 0, bloom: 0.32 },
+  { name: 'Golden hour', top: '#3A3F82', hor: '#F59F6E', sunC: '#FFB27A', sunI: 2.0, dir: [-0.85, 0.38, 0.25], hemiS: '#FFD9C0', hemiG: '#3A553A', hemiI: 0.9, fow: '#F4D6E2', exp: 1.05, stars: 0.15, bloom: 0.55 },
+  { name: 'Night', top: '#050A1C', hor: '#1B2B4E', sunC: '#9DB4FF', sunI: 0.55, dir: [0.3, 0.8, -0.4], hemiS: '#6F86C8', hemiG: '#10182A', hemiI: 0.5, fow: '#4B4E8C', exp: 0.95, stars: 1, bloom: 0.9 },
 ];
 // Follows the real local clock by default.
 export function timeIndexForHour(h) {

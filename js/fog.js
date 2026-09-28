@@ -4,9 +4,15 @@
 import * as THREE from 'three';
 import { loadBytes, saveBytes } from './storage.js';
 import { smooth } from './util.js';
-import { LANDCOVER, WATER } from './rules.js';
+import { FOG, LANDCOVER, WATER } from './rules.js';
 
 export const FOG_RES = 128;
+
+function cloudShadowRatio() {
+  const a = new THREE.Color(FOG.cloud);
+  const b = new THREE.Color(FOG.shadow);
+  return [b.r / a.r, b.g / a.g, b.b / a.b];
+}
 
 export class FogOfWar {
   constructor(proj) {
@@ -17,7 +23,10 @@ export class FogOfWar {
     // Shared by every tile material. uTime drives animation; the sun and the
     // reference height (ground under the player) drive the toon terrain tint.
     this.uniforms = {
-      uFowColor: { value: new THREE.Color('#171C38') },
+      uFowColor: { value: new THREE.Color(FOG.cloud) },
+      // shadow colour as a ratio of the cloud colour, so it follows the time of day
+      uFowShadow: { value: new THREE.Vector3(...cloudShadowRatio()) },
+      uFowEdge: { value: new THREE.Color(FOG.edge) },
       uTime: { value: 0 },
       uSunDir: { value: new THREE.Vector3(0.35, 1, 0.3) },
       uSunColor: { value: new THREE.Color('#FFF1D6') },
@@ -167,7 +176,7 @@ const WATER_COLOR = new THREE.Color(WATER.fill);
 // Works with MeshStandardMaterial and the cheaper MeshLambertMaterial.
 // `trunkColor`: for merged tree geometry, vertices with aTrunk = 1 use this colour
 // instead of the per-tree leaf colour.
-export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = false, waterMask = null, strength = 0.86, trunkColor = null, toon = terrain }) {
+export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = false, waterMask = null, strength = FOG.veil, trunkColor = null, toon = terrain }) {
   const lambert = !!mat.isMeshLambertMaterial;
   const u = {
     uReveal: { value: reveal },
@@ -175,6 +184,8 @@ export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = fa
     uTileSize: { value: size },
     uFowStrength: { value: strength },
     uFowColor: fog.uniforms.uFowColor,
+    uFowShadow: fog.uniforms.uFowShadow,
+    uFowEdge: fog.uniforms.uFowEdge,
     uTime: fog.uniforms.uTime,
     uSunDir: fog.uniforms.uSunDir,
     uSunColor: fog.uniforms.uSunColor,
@@ -217,6 +228,15 @@ export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = fa
       uniform float uFowStrength;
       uniform vec3 uFowColor;
       uniform float uTime;
+      uniform vec3 uFowShadow;
+      uniform vec3 uFowEdge;
+      float twHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float twNoise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        vec2 s = f * f * (3.0 - 2.0 * f);
+        return mix(mix(twHash(i), twHash(i + vec2(1.0, 0.0)), s.x), mix(twHash(i + vec2(0.0, 1.0)), twHash(i + vec2(1.0, 1.0)), s.x), s.y);
+      }
       uniform vec3 uSunDir;
       uniform vec3 uSunColor;
       uniform float uRefHeight;
@@ -249,16 +269,24 @@ export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = fa
         }`
       );
     }
+    // Cloud veil over unexplored land: two octaves of value noise drifting in world
+    // space, between the cloud and its shadow colour. Applied before the distance
+    // haze, so far clouds still fade into the horizon.
     frag = frag.replace(
-      '#include <dithering_fragment>',
-      `#include <dithering_fragment>
-      vec2 fuv = clamp((vFowPos.xz - uTileOrigin) / uTileSize, 0.0, 1.0);
-      float rev = texture2D(uReveal, fuv).r;
-      float swirl = sin(vFowPos.x * 0.012 + uTime * 0.35) * sin(vFowPos.z * 0.011 - uTime * 0.28) * 0.5 + 0.5;
-      float edge = smoothstep(0.12, 0.5, rev) * (1.0 - smoothstep(0.5, 0.95, rev));
-      vec3 fogCol = uFowColor + vec3(0.06, 0.07, 0.14) * swirl;
-      gl_FragColor.rgb = mix(gl_FragColor.rgb, fogCol, (1.0 - rev) * uFowStrength);
-      gl_FragColor.rgb += vec3(0.35, 0.8, 0.75) * edge * 0.14;`
+      '#include <fog_fragment>',
+      `{
+        vec2 fuv = clamp((vFowPos.xz - uTileOrigin) / uTileSize, 0.0, 1.0);
+        float rev = texture2D(uReveal, fuv).r;
+        vec2 cp = vFowPos.xz * 0.0075 + vec2(uTime * 0.018, uTime * 0.011);
+        float n = twNoise(cp) * 0.65 + twNoise(cp * 2.3 + vec2(7.1, 3.7) - uTime * 0.013) * 0.35;
+        vec3 cloud = mix(uFowColor * uFowShadow, uFowColor, smoothstep(0.3, 0.75, n));
+        float veil = (1.0 - rev) * uFowStrength * (0.78 + 0.34 * n);
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, linearToOutputTexel(vec4(cloud, 1.0)).rgb, clamp(veil, 0.0, 0.92));
+        float edge = smoothstep(0.15, 0.35, rev) * (1.0 - smoothstep(0.4, 0.65, rev));
+        float pulse = 0.75 + 0.25 * sin(uTime * 2.2 + (vFowPos.x + vFowPos.z) * 0.02);
+        gl_FragColor.rgb += linearToOutputTexel(vec4(uFowEdge, 1.0)).rgb * edge * pulse * 0.32;
+      }
+      #include <fog_fragment>`
     );
     sh.fragmentShader = frag;
   };

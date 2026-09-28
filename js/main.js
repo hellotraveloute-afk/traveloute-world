@@ -13,7 +13,8 @@ import { createWorld } from "./world.js";
 import { TileManager } from "./tiles.js";
 import { Landmarks } from "./landmarks.js";
 import { makeAvatar, animateAvatar } from "./avatar.js";
-import { GAMEPLAY, TIMES, timeIndexForHour, titleFor } from "./rules.js";
+import { FogClouds } from "./fogclouds.js";
+import { FOG, GAMEPLAY, TIMES, timeIndexForHour, titleFor } from "./rules.js";
 import { store } from "./storage.js";
 import * as hud from "./hud.js";
 import * as bridge from "./bridge.js";
@@ -28,7 +29,7 @@ const profile = store.get("profile", { stars: 0, xp: 0, level: 1, stamps: [] });
 // In the app, claims (and their cooldowns) come from the app with `setClaimed`.
 const claims = EMBED ? {} : store.get("claims", {});
 
-let proj, fog, world, tiles, landmarks, player, governor, frameDue;
+let proj, fog, world, tiles, landmarks, player, governor, frameDue, fogClouds;
 let mode = "explore";
 let timeIndex = 1;
 let gpsWatch = null;
@@ -196,6 +197,12 @@ async function startSession(
     onError: (message) => EMBED && bridge.send({ type: "error", message }),
   });
   governor = new QualityGovernor({ world, quality });
+  fogClouds = new FogClouds({
+    scene: world.scene,
+    fog,
+    quality,
+    heightAt: (x, z) => tiles.heightAt(x, z),
+  });
   // Mobile browsers can drop the GPU context (e.g. in the background). three.js
   // recovers its own state; tiles are rebuilt because their canvases were freed.
   world.renderer.domElement.addEventListener("webglcontextrestored", () => {
@@ -809,19 +816,19 @@ function getStarTexture() {
   starTexture = new THREE.CanvasTexture(cv);
   return starTexture;
 }
-function burst(pos, color) {
-  const N = 70;
+// `N` stars flying out; `power` scales their speed (1 = claim burst).
+function burst(pos, color, N = 70, power = 1) {
   const geo = new THREE.BufferGeometry();
   const arr = new Float32Array(N * 3);
   const vel = [];
   for (let i = 0; i < N; i++) {
     arr.set([pos.x, pos.y, pos.z], i * 3);
     const a = Math.random() * Math.PI * 2;
-    const s = 15 + Math.random() * 30;
+    const s = (15 + Math.random() * 30) * power;
     vel.push(
       new THREE.Vector3(
         Math.cos(a) * s,
-        30 + Math.random() * 40,
+        (30 + Math.random() * 40) * power,
         Math.sin(a) * s,
       ),
     );
@@ -998,6 +1005,8 @@ function reportFps(rawDt) {
 
 const clock = new THREE.Clock();
 const tmpDir = new THREE.Vector3();
+const sparklePos = new THREE.Vector3();
+let lastSparkle = -1;
 
 function updatePlayer(dt, t) {
   tmpDir.set(0, 0, 0);
@@ -1059,7 +1068,16 @@ function updatePlayer(dt, t) {
 
   if (player.position.distanceTo(lastStamp) > 4) {
     lastStamp.copy(player.position);
-    fog.stamp(player.position.x, player.position.z, GAMEPLAY.revealRadius);
+    const cleared = fog.stamp(player.position.x, player.position.z, GAMEPLAY.revealRadius);
+    // a little sparkle at the edge of the clearing, ahead of the player
+    if (cleared && moving && t - lastSparkle > 0.5) {
+      lastSparkle = t;
+      const r = GAMEPLAY.revealRadius * 0.85;
+      const sx = player.position.x + tmpDir.x * r;
+      const sz = player.position.z + tmpDir.z * r;
+      sparklePos.set(sx, tiles.heightAt(sx, sz) + 4, sz);
+      burst(sparklePos, FOG.sparkle, 20, 0.45);
+    }
   }
   if (destMarker.visible) {
     destMarker.userData.t += dt;
@@ -1144,6 +1162,7 @@ function frame(now) {
   }
   landmarks.update(dt, t, player.position, world.camera);
   updateBursts(dt);
+  if (hudLive) fogClouds.update(dt, player.position);
   updateScanRing(dt);
   world.updateTime(dt);
   updateCamera(dt);
