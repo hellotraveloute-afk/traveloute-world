@@ -147,6 +147,8 @@ export function createWorld(canvas, quality, fog) {
     hemi.groundColor.copy(now.hemiG);
     hemi.intensity = now.hemiI;
     fog.uniforms.uFowColor.value.copy(now.fow);
+    fog.uniforms.uSunDir.value.copy(now.dir);
+    fog.uniforms.uSunColor.value.copy(now.sunC).multiplyScalar(Math.min(1, now.sunI / 2));
     renderer.toneMappingExposure = now.exp;
     starMat.opacity = now.stars;
     stars.visible = now.stars > 0.01; // 1,500 points skipped in daylight

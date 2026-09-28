@@ -280,6 +280,7 @@ async function startSession(
     check();
   });
   player.position.y = tiles.heightAt(0, 0);
+  fog.uniforms.uRefHeight.value = player.position.y;
   cam.target.copy(player.position);
   $("#loader").classList.add("done");
   setTimeout(() => ($("#loader").hidden = true), 700);
@@ -1133,6 +1134,9 @@ function frame(now) {
   const t = clock.elapsedTime;
   fog.uniforms.uTime.value = t;
   updatePlayer(dt, t);
+  // the toon terrain tints valleys warm and heights cool relative to the player
+  const ref = fog.uniforms.uRefHeight;
+  ref.value = lerp(ref.value, player.position.y, Math.min(1, dt * 0.8));
   tileTimer += dt;
   if (tileTimer > 0.4) {
     tileTimer = 0;

@@ -132,6 +132,7 @@ export class PointsMaterial extends Material {}
 export class Texture extends EventTarget { constructor(img) { super(); this.image = img; stats.textures++; } }
 export class CanvasTexture extends Texture {}
 export class DataTexture extends Texture {}
+export const ShaderChunk = {}; // shaders are never compiled in Node
 export const SRGBColorSpace = 'srgb', RedFormat = 1, UnsignedByteType = 2, LinearFilter = 3, AdditiveBlending = 4, DoubleSide = 5, BackSide = 6, HalfFloatType = 7;
 export const ShapeUtils = {
   triangulateShape(contour) { // fan from the first point with an ear check, enough for the test's simple concave shapes

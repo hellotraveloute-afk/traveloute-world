@@ -25,9 +25,9 @@ import { tileKey } from './geo.js';
 import { patchTileMaterial } from './fog.js';
 import { BuildingBuffer } from './extrude.js';
 import { cachedFetch, freshFetch } from './net.js';
-import { clamp, hashStr, mulberry32, nextFrame } from './util.js';
+import { clamp, hashStr, mulberry32, nextFrame, shadeHex } from './util.js';
 import {
-  GROUND, LANDCOVER, LANDUSE, PARK, WATER, WATERWAY, ROADS, RAIL, BUILDING, TREES,
+  GROUND, LANDCOVER, LANDUSE, PARK, PAINT, DECOR, WATER, WATERWAY, ROADS, RAIL, BUILDING, TREES,
   classifyPlace, placeName, PLACE_MERGE_DISTANCE, RARITY,
 } from './rules.js';
 
@@ -600,17 +600,25 @@ export class TileManager {
     return g;
   }
 
-  terracePattern(ctx, fill) {
-    const key = fill;
+  // Terrace stripes (tea estates, fields). Each field gets its own direction and
+  // the stripes keep the same spacing in metres at every texture size.
+  terracePattern(ctx, rule, angle, scale) {
+    const key = rule.fill + rule.stripe;
     if (!this.terracePatterns.has(key)) {
       const { canvas, ctx: p } = makeCanvas(16);
-      p.fillStyle = fill;
+      p.fillStyle = rule.fill;
       p.fillRect(0, 0, 16, 16);
-      p.fillStyle = 'rgba(40,90,40,0.28)';
-      p.fillRect(0, 0, 16, 5);
+      p.fillStyle = rule.stripe || shadeHex(rule.fill, 0.2);
+      p.fillRect(0, 0, 16, 4);
+      p.fillStyle = shadeHex(rule.fill, -0.18); // soft highlight on the terrace lip
+      p.fillRect(0, 4, 16, 1);
       this.terracePatterns.set(key, canvas);
     }
-    return ctx.createPattern(this.terracePatterns.get(key), 'repeat');
+    const pat = ctx.createPattern(this.terracePatterns.get(key), 'repeat');
+    if (pat && pat.setTransform && typeof DOMMatrix !== 'undefined') {
+      pat.setTransform(new DOMMatrix().rotateSelf((angle * 180) / Math.PI).scaleSelf(scale, scale));
+    }
+    return pat;
   }
 
   // Paints the ground texture, a water mask (for shimmer) and a tree density map.
@@ -675,13 +683,45 @@ export class TileManager {
       }
     };
     const grey = (v) => `rgb(${v},${v},${v})`;
-    const area = (geom, ext, fill, trees, pattern) => {
+    const edgeW = Math.max(1.5, size * PAINT.edge);
+    // decorated areas (towns) are collected into one clip path for the scatter below
+    const decor = new Map(); // decor kind -> { clip: Path2D, x0, y0, x1, y1 }
+    const addDecor = (kind, geom, k) => {
+      let e = decor.get(kind);
+      if (!e) decor.set(kind, (e = { clip: new Path2D(), x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }));
+      for (const ring of geom) {
+        for (let i = 0; i < ring.length; i++) {
+          const x = ring[i].x * k;
+          const y = ring[i].y * k;
+          if (i === 0) e.clip.moveTo(x, y);
+          else e.clip.lineTo(x, y);
+          if (x < e.x0) e.x0 = x;
+          if (x > e.x1) e.x1 = x;
+          if (y < e.y0) e.y0 = y;
+          if (y > e.y1) e.y1 = y;
+        }
+        e.clip.closePath();
+      }
+    };
+    const area = (geom, ext, r) => {
       path(c, geom, size / ext, true);
-      c.fillStyle = pattern ? this.terracePattern(c, fill) : fill;
+      c.fillStyle = r.pattern ? this.terracePattern(c, r, rand() * Math.PI, size / 1024) : r.fill;
       c.fill('evenodd');
-      if (trees !== undefined) {
+      // soft darker band just inside the edge (clipped, so it never spills outside)
+      c.save();
+      c.clip('evenodd');
+      c.strokeStyle = shadeHex(r.fill, PAINT.edgeDarken);
+      c.globalAlpha = 0.45;
+      c.lineWidth = edgeW * 4;
+      c.stroke();
+      c.globalAlpha = 0.8;
+      c.lineWidth = edgeW * 1.6;
+      c.stroke();
+      c.restore();
+      if (r.decor) addDecor(r.decor, geom, size / ext);
+      if (r.trees !== undefined) {
         path(d, geom, 128 / ext, true);
-        d.fillStyle = grey(trees);
+        d.fillStyle = grey(r.trees);
         d.fill('evenodd');
       }
     };
@@ -689,18 +729,43 @@ export class TileManager {
     // land
     each('landcover', 3, (f, g, ext) => {
       const r = LANDCOVER[f.properties.class];
-      if (r) area(g, ext, r.fill, r.trees, r.pattern);
+      if (r) area(g, ext, r);
     });
     each('landuse', 3, (f, g, ext) => {
       const r = LANDUSE[f.properties.class];
-      if (r) area(g, ext, r.fill, r.trees);
+      if (r) area(g, ext, r);
     });
-    each('park', 3, (f, g, ext) => {
-      area(g, ext, PARK.fill, PARK.trees);
-      c.strokeStyle = PARK.stroke;
-      c.lineWidth = Math.max(1, size / 512);
-      c.stroke();
-    });
+    each('park', 3, (f, g, ext) => area(g, ext, PARK));
+    // grass patches, tufts and flowers, one fill per colour
+    for (const [kind, e] of decor) {
+      const rule = DECOR[kind];
+      if (!rule || e.x1 <= e.x0) continue;
+      const bw = Math.min(size, e.x1) - Math.max(0, e.x0);
+      const bh = Math.min(size, e.y1) - Math.max(0, e.y0);
+      if (bw <= 0 || bh <= 0) continue;
+      const share = (bw * bh) / (size * size);
+      const px = size / 1024; // sizes are in texels of a 1024 texture
+      c.save();
+      c.clip(e.clip, 'nonzero');
+      for (const layer of [rule.patches, rule.tufts, rule.flowers]) {
+        const paths = layer.colors.map(() => new Path2D());
+        const n = Math.round(layer.count * share);
+        for (let i = 0; i < n; i++) {
+          const x = Math.max(0, e.x0) + rand() * bw;
+          const y = Math.max(0, e.y0) + rand() * bh;
+          const r = Math.max(0.6, (layer.size[0] + rand() * (layer.size[1] - layer.size[0])) * px);
+          const p = paths[Math.floor(rand() * paths.length)];
+          p.moveTo(x + r, y);
+          p.arc(x, y, r, 0, Math.PI * 2);
+        }
+        c.globalAlpha = layer.alpha || 1;
+        paths.forEach((p, i) => {
+          c.fillStyle = layer.colors[i];
+          c.fill(p);
+        });
+      }
+      c.restore();
+    }
     if (!(await step())) return null;
 
     // water
@@ -745,13 +810,16 @@ export class TileManager {
     });
     const width = (r) => (RAIL.classes.includes(r.p.class) ? RAIL.w : ROADS[r.p.class] ? ROADS[r.p.class].w : 0);
     roads.sort((a, b) => width(a) - width(b));
+    // roads are drawn a little wider than real life so they read on a phone
+    const roadW = (rule) => Math.max(1, rule.w * m * 1.12);
+    const casingW = Math.max(1.6, size / 340);
     for (const r of roads) {
       const rule = ROADS[r.p.class];
       if (!rule || rule.dash) continue;
       path(c, r.g, size / r.ext, false);
       c.setLineDash([]);
       c.strokeStyle = rule.casing;
-      c.lineWidth = Math.max(1.6, rule.w * m + 2);
+      c.lineWidth = roadW(rule) + casingW * 2;
       c.stroke();
     }
     for (const r of roads) {
@@ -760,9 +828,15 @@ export class TileManager {
       if (!rule) continue;
       path(c, r.g, size / r.ext, false);
       c.strokeStyle = rule.fill;
-      c.lineWidth = Math.max(1, rule.w * m);
+      c.lineWidth = isRail ? Math.max(1, rule.w * m) : roadW(rule);
       c.setLineDash(rule.dash ? rule.dash.map((v) => Math.max(1, v * m * 2)) : []);
       c.stroke();
+      if (rule.centre) {
+        c.strokeStyle = rule.centre;
+        c.lineWidth = Math.max(0.7, rule.w * m * 0.1);
+        c.setLineDash([Math.max(2, 6 * m), Math.max(2, 7 * m)]);
+        c.stroke();
+      }
       if (isRail) {
         c.strokeStyle = RAIL.tie;
         c.lineWidth = Math.max(1, rule.w * m * 1.8);

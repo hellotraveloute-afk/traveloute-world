@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { loadBytes, saveBytes } from './storage.js';
 import { smooth } from './util.js';
+import { LANDCOVER, WATER } from './rules.js';
 
 export const FOG_RES = 128;
 
@@ -13,7 +14,15 @@ export class FogOfWar {
     this.grids = new Map();
     this.textures = new Map(); // key -> { tex, refs }
     this.dirty = new Set();
-    this.uniforms = { uFowColor: { value: new THREE.Color('#171C38') }, uTime: { value: 0 } };
+    // Shared by every tile material. uTime drives animation; the sun and the
+    // reference height (ground under the player) drive the toon terrain tint.
+    this.uniforms = {
+      uFowColor: { value: new THREE.Color('#171C38') },
+      uTime: { value: 0 },
+      uSunDir: { value: new THREE.Vector3(0.35, 1, 0.3) },
+      uSunColor: { value: new THREE.Color('#FFF1D6') },
+      uRefHeight: { value: 0 },
+    };
   }
 
   key(tx, ty) {
@@ -134,11 +143,31 @@ export class FogOfWar {
   }
 }
 
-// Adds fog of war (and for terrain: water shimmer and rocky slopes) to a tile material.
+// Toon lighting: the sun's light falls into three soft bands instead of a smooth
+// ramp. Patched into the light function of both the Lambert and the Standard
+// material, so it costs the same as before.
+const TOON_GLSL = `
+float twToon(float x) {
+  float t = smoothstep(0.0, 0.1, x) * 0.5 + smoothstep(0.3, 0.45, x) * 0.5;
+  return mix(x, t, 0.72);
+}`;
+const DOT_NL = 'float dotNL = saturate( dot( geometryNormal, directLight.direction ) );';
+function toonLights(frag, lambert) {
+  const chunk = lambert ? 'lights_lambert_pars_fragment' : 'lights_physical_pars_fragment';
+  const src = THREE.ShaderChunk[chunk];
+  if (!src || !src.includes(DOT_NL)) return frag; // a three.js update changed the chunk: plain lighting
+  return frag.replace(`#include <${chunk}>`, `${TOON_GLSL}\n${src.replace(DOT_NL, 'float dotNL = twToon( saturate( dot( geometryNormal, directLight.direction ) ) );')}`);
+}
+
+const ROCK_COLOR = new THREE.Color(LANDCOVER.rock.fill);
+const WATER_COLOR = new THREE.Color(WATER.fill);
+
+// Adds fog of war (and for terrain: water shimmer, rocky slopes, height tint and
+// rim light) to a tile material, plus toon lighting.
 // Works with MeshStandardMaterial and the cheaper MeshLambertMaterial.
 // `trunkColor`: for merged tree geometry, vertices with aTrunk = 1 use this colour
 // instead of the per-tree leaf colour.
-export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = false, waterMask = null, strength = 0.86, trunkColor = null }) {
+export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = false, waterMask = null, strength = 0.86, trunkColor = null, toon = terrain }) {
   const lambert = !!mat.isMeshLambertMaterial;
   const u = {
     uReveal: { value: reveal },
@@ -147,7 +176,12 @@ export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = fa
     uFowStrength: { value: strength },
     uFowColor: fog.uniforms.uFowColor,
     uTime: fog.uniforms.uTime,
+    uSunDir: fog.uniforms.uSunDir,
+    uSunColor: fog.uniforms.uSunColor,
+    uRefHeight: fog.uniforms.uRefHeight,
     uWaterMask: { value: waterMask },
+    uRockColor: { value: ROCK_COLOR },
+    uWaterColor: { value: WATER_COLOR },
     uTrunkColor: { value: trunkColor || new THREE.Color() },
   };
   mat.onBeforeCompile = (sh) => {
@@ -183,19 +217,33 @@ export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = fa
       uniform float uFowStrength;
       uniform vec3 uFowColor;
       uniform float uTime;
-      ${terrain ? 'uniform sampler2D uWaterMask;' : ''}`
+      uniform vec3 uSunDir;
+      uniform vec3 uSunColor;
+      uniform float uRefHeight;
+      ${terrain ? 'uniform sampler2D uWaterMask;\nuniform vec3 uRockColor;\nuniform vec3 uWaterColor;' : ''}`
     );
+    if (toon) frag = toonLights(frag, lambert);
     if (terrain) {
       frag = frag.replace(
         '#include <emissivemap_fragment>',
         `#include <emissivemap_fragment>
         {
           float wm = texture2D(uWaterMask, vMapUv).r;
+          float land = 1.0 - wm;
           vec3 upV = normalize((viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
           float steep = 1.0 - abs(dot(normal, upV));
-          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.56, 0.54, 0.49), smoothstep(0.30, 0.55, steep) * (1.0 - wm));
+          diffuseColor.rgb = mix(diffuseColor.rgb, uRockColor, smoothstep(0.30, 0.55, steep) * land);
+          // warmer in valleys, cooler and bluer up high (relative to the player's ground)
+          float hk = clamp((vFowPos.y - uRefHeight) / 220.0, -1.0, 1.0);
+          vec3 tint = hk < 0.0 ? vec3(1.07, 1.03, 0.84) : vec3(0.88, 1.0, 1.08);
+          diffuseColor.rgb *= mix(vec3(1.0), tint, abs(hk) * 0.75 * land);
+          // warm rim light on slopes that face the sun
+          vec3 nW = inverseTransformDirection(normal, viewMatrix);
+          float toSun = saturate(dot(nW, normalize(uSunDir)));
+          float rim = smoothstep(0.15, 0.6, steep) * toSun * toSun * (0.6 + 0.4 * pow(1.0 - saturate(dot(normal, normalize(vViewPosition))), 2.0));
+          totalEmissiveRadiance += uSunColor * diffuseColor.rgb * rim * land * 0.3;
           float wave = sin(vFowPos.x * 0.35 + uTime * 1.7) * sin(vFowPos.z * 0.29 - uTime * 1.3);
-          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.23, 0.66, 0.85) + wave * 0.04, wm * 0.85);
+          diffuseColor.rgb = mix(diffuseColor.rgb, uWaterColor + wave * 0.04, wm * 0.85);
           ${lambert ? '' : 'roughnessFactor = mix(roughnessFactor, 0.12, wm);'}
           totalEmissiveRadiance += vec3(0.6, 0.9, 1.0) * smoothstep(0.8, 1.0, wave) * wm * ${lambert ? '0.55' : '0.4'};
         }`
@@ -215,6 +263,6 @@ export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = fa
     sh.fragmentShader = frag;
   };
   const kind = terrain ? 'terrain' : trunkColor ? 'tree' : 'object';
-  mat.customProgramCacheKey = () => `tw-${kind}${lambert ? '-l' : ''}`;
+  mat.customProgramCacheKey = () => `tw-${kind}${lambert ? '-l' : ''}${toon ? '-t' : ''}`;
   return mat;
 }

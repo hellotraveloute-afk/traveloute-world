@@ -30,6 +30,23 @@ export function mulberry32(seed) {
   };
 }
 
+// '#RRGGBB' made darker by `k` (0–1), or lighter for negative `k`. Cached: rules
+// colours are few and this runs per painted polygon.
+const shades = new Map();
+export function shadeHex(hex, k) {
+  const key = hex + k;
+  let out = shades.get(key);
+  if (out) return out;
+  const n = parseInt(hex.slice(1), 16);
+  const ch = (v) => {
+    const c = k >= 0 ? v * (1 - k) : v + (255 - v) * -k;
+    return Math.round(clamp(c, 0, 255)).toString(16).padStart(2, '0');
+  };
+  out = `#${ch((n >> 16) & 255)}${ch((n >> 8) & 255)}${ch(n & 255)}`;
+  shades.set(key, out);
+  return out;
+}
+
 export const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
 
 export function escapeHtml(s) {
