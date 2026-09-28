@@ -37,7 +37,7 @@ export function shadeHex(hex, k) {
   const key = hex + k;
   let out = shades.get(key);
   if (out) return out;
-  const n = parseInt(hex.slice(1), 16);
+  const n = Number.parseInt(hex.slice(1), 16);
   const ch = (v) => {
     const c = k >= 0 ? v * (1 - k) : v + (255 - v) * -k;
     return Math.round(clamp(c, 0, 255)).toString(16).padStart(2, '0');

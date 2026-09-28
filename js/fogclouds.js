@@ -100,6 +100,17 @@ export class FogClouds {
     it.vx = REDUCED_MOTION ? 0 : 1.5 + this.rand() * 2;
   }
 
+  // Moves one cloud with the wind and fades it out when the land below is
+  // revealed or the player walked away.
+  drift(it, dt, player) {
+    it.x += it.vx * dt;
+    const far = FOG.billboards.spawnRadius[1] * 1.4;
+    const d = Math.hypot(it.x - player.x, it.z - player.z);
+    const want = this.fog.at(it.x, it.z) < 0.25 && d < far ? 1 : 0;
+    it.a += (want - it.a) * Math.min(1, dt * (want ? 0.6 : 2.5));
+    if (!want && it.a < 0.02) it.on = false;
+  }
+
   update(dt, player) {
     const enabled = !!this.quality.fogClouds;
     this.mesh.visible = enabled;
@@ -109,17 +120,9 @@ export class FogClouds {
       this.spawnTimer = 0;
       this.spawn(player.x, player.z);
     }
-    const far = FOG.billboards.spawnRadius[1] * 1.4;
     for (let i = 0; i < this.max; i++) {
       const it = this.items[i];
-      if (it.on) {
-        it.x += it.vx * dt;
-        const d = Math.hypot(it.x - player.x, it.z - player.z);
-        // fade out when the land below is revealed or the player walked away
-        const want = this.fog.at(it.x, it.z) < 0.25 && d < far ? 1 : 0;
-        it.a += (want - it.a) * Math.min(1, dt * (want ? 0.6 : 2.5));
-        if (!want && it.a < 0.02) it.on = false;
-      }
+      if (it.on) this.drift(it, dt, player);
       this.alpha[i] = it.on ? it.a : 0;
       this.m.compose(this.v.set(it.x, it.y, it.z), this.q, this.sv.setScalar(it.on ? it.s : 0));
       this.mesh.setMatrixAt(i, this.m);

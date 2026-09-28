@@ -109,9 +109,15 @@ export const BUILDING = {
   minHeight: 3.5,
   maxHeight: 90,
   minArea: 12, // square metres; smaller shapes are skipped
-  footprint: '#B4A588',
-  walls: ['#F4EEE2', '#EFE3CC', '#F7D9C4', '#DDEBE6', '#F1E6B8', '#E9E4F2'],
-  roofs: ['#C2573A', '#A8452F', '#3F7F8C', '#6C8F4E', '#B5654A', '#8D5A9E'],
+  footprint: '#D9C7A2',
+  walls: ['#FFF6E6', '#FFE9D1', '#FDE2E4', '#E3F4F1', '#FFF2C2', '#EDE7FF'],
+  roofs: ['#E4572E', '#F08A4B', '#3FA7A1', '#5B8DEF', '#C4453D', '#8E6CCB'],
+  gableMaxArea: 400, // m²; smaller (nearly) rectangular buildings get a pitched roof
+  parapet: 0.4, // m; lip around flat roofs
+  rimDarken: 0.25, // parapet colour: roof colour this much darker
+  plinth: { height: 0.8, darken: 0.25 }, // darker band at the foot of the walls
+  // Windows are drawn by the building shader, not modelled. Metres.
+  windows: { floorHeight: 3.2, spacing: 3.0, width: 1.2, height: 1.4, sill: 1.0, topGap: 0.6, day: '#5A7BA8', night: '#FFD98A', litShare: 0.4 },
 };
 
 /* ---------- trees ---------- */
@@ -211,10 +217,10 @@ export function titleFor(level) {
 
 /* ---------- time of day ---------- */
 export const TIMES = [
-  { name: 'Dawn', top: '#34508E', hor: '#F7C49A', sunC: '#FFC89A', sunI: 1.5, dir: [0.9, 0.32, -0.2], hemiS: '#FFE0C8', hemiG: '#40583E', hemiI: 0.85, fow: '#F3DCEB', exp: 1.0, stars: 0, bloom: 0.5 },
-  { name: 'Day', top: '#3C8EE6', hor: '#C6E9F7', sunC: '#FFF4E0', sunI: 2.4, dir: [0.35, 1, 0.3], hemiS: '#DDF0FF', hemiG: '#5C7A48', hemiI: 1.05, fow: '#E9E6FF', exp: 1.0, stars: 0, bloom: 0.32 },
-  { name: 'Golden hour', top: '#3A3F82', hor: '#F59F6E', sunC: '#FFB27A', sunI: 2.0, dir: [-0.85, 0.38, 0.25], hemiS: '#FFD9C0', hemiG: '#3A553A', hemiI: 0.9, fow: '#F4D6E2', exp: 1.05, stars: 0.15, bloom: 0.55 },
-  { name: 'Night', top: '#050A1C', hor: '#1B2B4E', sunC: '#9DB4FF', sunI: 0.55, dir: [0.3, 0.8, -0.4], hemiS: '#6F86C8', hemiG: '#10182A', hemiI: 0.5, fow: '#4B4E8C', exp: 0.95, stars: 1, bloom: 0.9 },
+  { name: 'Dawn', top: '#34508E', hor: '#F7C49A', sunC: '#FFC89A', sunI: 1.5, dir: [0.9, 0.32, -0.2], hemiS: '#FFE0C8', hemiG: '#40583E', hemiI: 0.85, fow: '#F3DCEB', exp: 1.0, stars: 0, bloom: 0.5, win: 0.35 },
+  { name: 'Day', top: '#3C8EE6', hor: '#C6E9F7', sunC: '#FFF4E0', sunI: 2.4, dir: [0.35, 1, 0.3], hemiS: '#DDF0FF', hemiG: '#5C7A48', hemiI: 1.05, fow: '#E9E6FF', exp: 1.0, stars: 0, bloom: 0.32, win: 0 },
+  { name: 'Golden hour', top: '#3A3F82', hor: '#F59F6E', sunC: '#FFB27A', sunI: 2.0, dir: [-0.85, 0.38, 0.25], hemiS: '#FFD9C0', hemiG: '#3A553A', hemiI: 0.9, fow: '#F4D6E2', exp: 1.05, stars: 0.15, bloom: 0.55, win: 0.3 },
+  { name: 'Night', top: '#050A1C', hor: '#1B2B4E', sunC: '#9DB4FF', sunI: 0.55, dir: [0.3, 0.8, -0.4], hemiS: '#6F86C8', hemiG: '#10182A', hemiI: 0.5, fow: '#4B4E8C', exp: 0.95, stars: 1, bloom: 0.9, win: 1 },
 ];
 // Follows the real local clock by default.
 export function timeIndexForHour(h) {

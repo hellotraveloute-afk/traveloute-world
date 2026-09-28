@@ -19,7 +19,7 @@ import { store } from "./storage.js";
 import * as hud from "./hud.js";
 import * as bridge from "./bridge.js";
 import { QualityGovernor, makeFrameCap } from "./perf.js";
-import { clamp, lerp, fmt, escapeHtml } from "./util.js";
+import { clamp, lerp, fmt, escapeHtml, mulberry32 } from "./util.js";
 
 const $ = hud.$;
 const EMBED = bridge.EMBED;
@@ -816,6 +816,10 @@ function getStarTexture() {
   starTexture = new THREE.CanvasTexture(cv);
   return starTexture;
 }
+// Randomness for visual effects only (never for game rules or anything secret),
+// so a fast seeded generator is enough.
+const fxRand = mulberry32(0x7a3b);
+
 // `N` stars flying out; `power` scales their speed (1 = claim burst).
 function burst(pos, color, N = 70, power = 1) {
   const geo = new THREE.BufferGeometry();
@@ -823,12 +827,12 @@ function burst(pos, color, N = 70, power = 1) {
   const vel = [];
   for (let i = 0; i < N; i++) {
     arr.set([pos.x, pos.y, pos.z], i * 3);
-    const a = Math.random() * Math.PI * 2;
-    const s = (15 + Math.random() * 30) * power;
+    const a = fxRand() * Math.PI * 2;
+    const s = (15 + fxRand() * 30) * power;
     vel.push(
       new THREE.Vector3(
         Math.cos(a) * s,
-        (30 + Math.random() * 40) * power,
+        (30 + fxRand() * 40) * power,
         Math.sin(a) * s,
       ),
     );

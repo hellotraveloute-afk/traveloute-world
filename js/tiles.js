@@ -117,6 +117,33 @@ function treeGeometry(crown) {
   return merged;
 }
 
+// All areas of one decor kind in a tile: one clip path plus its bounding box.
+class DecorArea {
+  constructor() {
+    this.clip = new Path2D();
+    this.x0 = Infinity;
+    this.y0 = Infinity;
+    this.x1 = -Infinity;
+    this.y1 = -Infinity;
+  }
+
+  add(geom, k) {
+    for (const ring of geom) {
+      ring.forEach((p, i) => {
+        const x = p.x * k;
+        const y = p.y * k;
+        if (i === 0) this.clip.moveTo(x, y);
+        else this.clip.lineTo(x, y);
+        this.x0 = Math.min(this.x0, x);
+        this.x1 = Math.max(this.x1, x);
+        this.y0 = Math.min(this.y0, y);
+        this.y1 = Math.max(this.y1, y);
+      });
+      this.clip.closePath();
+    }
+  }
+}
+
 function triangulate(pts) {
   return THREE.ShapeUtils.triangulateShape(pts.map((p) => new THREE.Vector2(p.x, p.z)), []);
 }
@@ -615,10 +642,43 @@ export class TileManager {
       this.terracePatterns.set(key, canvas);
     }
     const pat = ctx.createPattern(this.terracePatterns.get(key), 'repeat');
-    if (pat && pat.setTransform && typeof DOMMatrix !== 'undefined') {
+    if (pat?.setTransform && typeof DOMMatrix !== 'undefined') {
       pat.setTransform(new DOMMatrix().rotateSelf((angle * 180) / Math.PI).scaleSelf(scale, scale));
     }
     return pat;
+  }
+
+  // Grass patches, tufts and flowers scattered inside a DecorArea: one clip, then
+  // one fill per colour. Counts scale with the area's bounding box.
+  paintDecor(c, area, rule, size, rand) {
+    const x0 = Math.max(0, area.x0);
+    const y0 = Math.max(0, area.y0);
+    const bw = Math.min(size, area.x1) - x0;
+    const bh = Math.min(size, area.y1) - y0;
+    if (bw <= 0 || bh <= 0) return;
+    const share = (bw * bh) / (size * size);
+    const px = size / 1024; // sizes are in texels of a 1024 texture
+    c.save();
+    c.clip(area.clip, 'nonzero');
+    for (const layer of [rule.patches, rule.tufts, rule.flowers]) {
+      const paths = layer.colors.map(() => new Path2D());
+      const n = Math.round(layer.count * share);
+      const [s0, s1] = layer.size;
+      for (let i = 0; i < n; i++) {
+        const x = x0 + rand() * bw;
+        const y = y0 + rand() * bh;
+        const r = Math.max(0.6, (s0 + rand() * (s1 - s0)) * px);
+        const p = paths[Math.floor(rand() * paths.length)];
+        p.moveTo(x + r, y);
+        p.arc(x, y, r, 0, Math.PI * 2);
+      }
+      c.globalAlpha = layer.alpha || 1;
+      paths.forEach((p, i) => {
+        c.fillStyle = layer.colors[i];
+        c.fill(p);
+      });
+    }
+    c.restore();
   }
 
   // Paints the ground texture, a water mask (for shimmer) and a tree density map.
@@ -685,23 +745,10 @@ export class TileManager {
     const grey = (v) => `rgb(${v},${v},${v})`;
     const edgeW = Math.max(1.5, size * PAINT.edge);
     // decorated areas (towns) are collected into one clip path for the scatter below
-    const decor = new Map(); // decor kind -> { clip: Path2D, x0, y0, x1, y1 }
+    const decor = new Map(); // decor kind -> DecorArea
     const addDecor = (kind, geom, k) => {
-      let e = decor.get(kind);
-      if (!e) decor.set(kind, (e = { clip: new Path2D(), x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }));
-      for (const ring of geom) {
-        for (let i = 0; i < ring.length; i++) {
-          const x = ring[i].x * k;
-          const y = ring[i].y * k;
-          if (i === 0) e.clip.moveTo(x, y);
-          else e.clip.lineTo(x, y);
-          if (x < e.x0) e.x0 = x;
-          if (x > e.x1) e.x1 = x;
-          if (y < e.y0) e.y0 = y;
-          if (y > e.y1) e.y1 = y;
-        }
-        e.clip.closePath();
-      }
+      if (!decor.has(kind)) decor.set(kind, new DecorArea());
+      decor.get(kind).add(geom, k);
     };
     const area = (geom, ext, r) => {
       path(c, geom, size / ext, true);
@@ -736,36 +783,7 @@ export class TileManager {
       if (r) area(g, ext, r);
     });
     each('park', 3, (f, g, ext) => area(g, ext, PARK));
-    // grass patches, tufts and flowers, one fill per colour
-    for (const [kind, e] of decor) {
-      const rule = DECOR[kind];
-      if (!rule || e.x1 <= e.x0) continue;
-      const bw = Math.min(size, e.x1) - Math.max(0, e.x0);
-      const bh = Math.min(size, e.y1) - Math.max(0, e.y0);
-      if (bw <= 0 || bh <= 0) continue;
-      const share = (bw * bh) / (size * size);
-      const px = size / 1024; // sizes are in texels of a 1024 texture
-      c.save();
-      c.clip(e.clip, 'nonzero');
-      for (const layer of [rule.patches, rule.tufts, rule.flowers]) {
-        const paths = layer.colors.map(() => new Path2D());
-        const n = Math.round(layer.count * share);
-        for (let i = 0; i < n; i++) {
-          const x = Math.max(0, e.x0) + rand() * bw;
-          const y = Math.max(0, e.y0) + rand() * bh;
-          const r = Math.max(0.6, (layer.size[0] + rand() * (layer.size[1] - layer.size[0])) * px);
-          const p = paths[Math.floor(rand() * paths.length)];
-          p.moveTo(x + r, y);
-          p.arc(x, y, r, 0, Math.PI * 2);
-        }
-        c.globalAlpha = layer.alpha || 1;
-        paths.forEach((p, i) => {
-          c.fillStyle = layer.colors[i];
-          c.fill(p);
-        });
-      }
-      c.restore();
-    }
+    for (const [kind, e] of decor) if (DECOR[kind]) this.paintDecor(c, e, DECOR[kind], size, rand);
     if (!(await step())) return null;
 
     // water
@@ -952,6 +970,8 @@ export class TileManager {
     const bufs = new Array(C * C).fill(null);
     const wall = new THREE.Color();
     const roof = new THREE.Color();
+    const rim = new THREE.Color();
+    const style = { gableArea: BUILDING.gableMaxArea, parapet: q.parapets ? BUILDING.parapet : 0, rim, along: 0 };
     let count = 0;
     outer: for (let i = 0; i < layer.length; i++) {
       if (i % 400 === 399) {
@@ -981,17 +1001,20 @@ export class TileManager {
         let base = Infinity;
         for (const pt of ring) base = Math.min(base, this.sampleGrid(t, pt.x / ext, pt.y / ext));
         wall.set(BUILDING.walls[Math.floor(rand() * BUILDING.walls.length)]);
-        roof.set(BUILDING.roofs[Math.floor(rand() * BUILDING.roofs.length)]);
+        const roofHex = BUILDING.roofs[Math.floor(rand() * BUILDING.roofs.length)];
+        roof.set(roofHex);
+        rim.set(shadeHex(roofHex, BUILDING.rimDarken));
+        style.along = rand() * 50; // so neighbours don't share a window pattern
 
         const chunk = Math.min(C - 1, Math.floor((cy / ext) * C)) * C + Math.min(C - 1, Math.floor((cx / ext) * C));
         const buf = bufs[chunk] || (bufs[chunk] = new BuildingBuffer(q.shadows));
         const pts = ring.map((pt) => ({ x: pt.x * k, z: pt.y * k }));
-        if (buf.add(pts, base - 1, base + h, wall, roof, triangulate) && ++count >= q.buildings) break outer;
+        if (buf.add(pts, base - 1, base + h, wall, roof, triangulate, style) && ++count >= q.buildings) break outer;
       }
     }
     if (!count) return;
 
-    const mat = patchTileMaterial(this.material({ vertexColors: true, flatShading: true, roughness: 0.8 }), this.fog, fogOpts);
+    const mat = patchTileMaterial(this.material({ vertexColors: true, flatShading: true, roughness: 0.8 }), this.fog, { ...fogOpts, windows: true, toon: true });
     t.disposables.push(mat);
     bufs.forEach((buf, chunk) => {
       if (!buf || !buf.n) return;
@@ -999,6 +1022,7 @@ export class TileManager {
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.BufferAttribute(a.position, 3));
       g.setAttribute('color', new THREE.BufferAttribute(a.color, 3));
+      g.setAttribute('aWin', new THREE.BufferAttribute(a.win, 3));
       if (a.normal) g.setAttribute('normal', new THREE.BufferAttribute(a.normal, 3));
       g.computeBoundingSphere();
       const mesh = new THREE.Mesh(g, mat);

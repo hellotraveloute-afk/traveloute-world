@@ -8,7 +8,7 @@ for (const m of ['beginPath', 'moveTo', 'lineTo', 'closePath', 'fill', 'stroke',
 // save/restore must balance, so they are counted
 Ctx2D.prototype.save = function () { this.depth = (this.depth || 0) + 1; this.ops++; };
 Ctx2D.prototype.restore = function () { this.depth--; this.ops++; };
-globalThis.Path2D = class { constructor() { this.n = 0; } rect() { this.n++; } moveTo() { this.n++; } lineTo() { this.n++; } closePath() {} arc() { this.n++; globalThis.Path2D.arcs++; } };
+globalThis.Path2D = class { n = 0; rect() { this.n++; } moveTo() { this.n++; } lineTo() { this.n++; } closePath() { this.closed = true; } arc() { this.n++; globalThis.Path2D.arcs++; } };
 globalThis.Path2D.arcs = 0;
 globalThis.document = { createElement: (tag) => { const c = { tag, width: 0, height: 0, style: {}, className: '', innerHTML: '', children: [], appendChild(e) { this.children.push(e); e.parent = this; }, remove() { if (this.parent) this.parent.children = this.parent.children.filter((x) => x !== this); }, classList: { toggle() {}, add() {}, remove() {} } }; c.getContext = () => new Ctx2D(c); return c; }, body: { classList: { toggle() {} } } };
 globalThis.window = globalThis;

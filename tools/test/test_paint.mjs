@@ -21,7 +21,7 @@ for (const tier of ['low', 'high']) {
   const tile = { cancelled: false, key: 'test' };
   const arcs0 = globalThis.Path2D.arcs;
   const res = await tm.paint(tile, new VectorTile(), q.texSize, proj.tileMeters, mulberry32(1));
-  ok(res && res.color.width === q.texSize && res.color.height === q.texSize, `${tier}: ground canvas ${res.color.width}x${res.color.height}`);
+  ok(res?.color.width === q.texSize && res.color.height === q.texSize, `${tier}: ground canvas ${res.color.width}x${res.color.height}`);
   ok(res.water.width === 256 && res.water.height === 256, `${tier}: water mask 256x256`);
   ok(res.density && res.density.length === 128 * 128 * 4 && res.density.some((v) => v > 0), `${tier}: density map 128x128, not empty`);
   const ctx = res.color.getContext();
