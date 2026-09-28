@@ -8,6 +8,36 @@ import { BUILDING, FOG, LANDCOVER, WATER } from './rules.js';
 
 export const FOG_RES = 128;
 
+// A small tiling value-noise texture for the cloud veil: two texture reads per
+// pixel are much cheaper on phone GPUs than computing noise in the shader.
+function noiseTexture(size = 64, cell = 8) {
+  let s = 12345;
+  const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+  const g = cell; // lattice points per side (wraps)
+  const lattice = Array.from({ length: g * g }, rnd);
+  const at = (i, j) => lattice[((j + g) % g) * g + ((i + g) % g)];
+  const data = new Uint8Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const fx = (x / size) * g;
+      const fy = (y / size) * g;
+      const i = Math.floor(fx);
+      const j = Math.floor(fy);
+      const u = smooth(0, 1, fx - i);
+      const v = smooth(0, 1, fy - j);
+      const a = at(i, j) + (at(i + 1, j) - at(i, j)) * u;
+      const b = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * u;
+      data[y * size + x] = Math.round((a + (b - a) * v) * 255);
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size, THREE.RedFormat, THREE.UnsignedByteType);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 function cloudShadowRatio() {
   const a = new THREE.Color(FOG.cloud);
   const b = new THREE.Color(FOG.shadow);
@@ -32,6 +62,7 @@ export class FogOfWar {
       uSunColor: { value: new THREE.Color('#FFF1D6') },
       uRefHeight: { value: 0 },
       uNight: { value: 0 }, // 0 day – 1 night: lit windows
+      uNoise: { value: noiseTexture() },
     };
   }
 
@@ -200,15 +231,10 @@ const WINDOWS_GLSL = `
 
 /* ---------- GLSL pieces for patchTileMaterial ---------- */
 
-// value noise shared by the cloud veil
+// value noise for the cloud veil, read from a tiling texture (8 lattice cells per repeat)
 const NOISE_GLSL = `
-float twHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float twNoise(vec2 p) {
-  vec2 i = floor(p);
-  vec2 f = fract(p);
-  vec2 s = f * f * (3.0 - 2.0 * f);
-  return mix(mix(twHash(i), twHash(i + vec2(1.0, 0.0)), s.x), mix(twHash(i + vec2(0.0, 1.0)), twHash(i + vec2(1.0, 1.0)), s.x), s.y);
-}`;
+uniform sampler2D uNoise;
+float twNoise(vec2 p) { return texture2D(uNoise, p * 0.125).r; }`;
 
 // Terrain: rocky steep slopes, warm valleys / cool heights relative to the
 // player's ground, warm rim light on slopes that face the sun, water shimmer.
@@ -260,6 +286,7 @@ const VEIL_GLSL = `
 {
   vec2 fuv = clamp((vFowPos.xz - uTileOrigin) / uTileSize, 0.0, 1.0);
   float rev = texture2D(uReveal, fuv).r;
+  if (rev < 0.99) { // explored ground skips the veil entirely
   vec2 cp = vFowPos.xz * 0.0075 + vec2(uTime * 0.018, uTime * 0.011);
   float n = twNoise(cp) * 0.65 + twNoise(cp * 2.3 + vec2(7.1, 3.7) - uTime * 0.013) * 0.35;
   vec3 cloud = mix(uFowColor * uFowShadow, uFowColor, smoothstep(0.3, 0.75, n));
@@ -268,6 +295,7 @@ const VEIL_GLSL = `
   float edge = smoothstep(0.15, 0.35, rev) * (1.0 - smoothstep(0.4, 0.65, rev));
   float pulse = 0.75 + 0.25 * sin(uTime * 2.2 + (vFowPos.x + vFowPos.z) * 0.02);
   gl_FragColor.rgb += linearToOutputTexel(vec4(uFowEdge, 1.0)).rgb * edge * pulse * 0.32;
+  }
 }`;
 
 const FRAG_UNIFORMS = `
@@ -360,6 +388,7 @@ export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = fa
     uTrunkColor: { value: trunkColor || new THREE.Color() },
     uSway: SWAY,
     uNight: U.uNight,
+    uNoise: U.uNoise,
     uWinDay: { value: WIN_DAY },
     uWinNight: { value: WIN_NIGHT },
   };
