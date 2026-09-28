@@ -17,13 +17,13 @@
 // check (cull) can skip the parts of a tile that can't be seen.
 
 import * as THREE from 'three';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import * as PbfModule from 'pbf';
 import * as VectorTileModule from '@mapbox/vector-tile';
 import { CONFIG } from './config.js';
 import { tileKey } from './geo.js';
 import { patchTileMaterial } from './fog.js';
 import { BuildingBuffer } from './extrude.js';
+import { pineGeometry, roundGeometry, palmGeometry } from './treegeo.js';
 import { cachedFetch, freshFetch } from './net.js';
 import { clamp, hashStr, mulberry32, nextFrame, shadeHex } from './util.js';
 import {
@@ -36,7 +36,7 @@ const Pbf = PbfModule.default || PbfModule.Pbf || PbfModule;
 const VectorTile = VectorTileModule.VectorTile || (VectorTileModule.default && VectorTileModule.default.VectorTile);
 
 const RARITY_ORDER = { Common: 0, Rare: 1, Epic: 2, Legendary: 3 };
-const TRUNK_COLOR = new THREE.Color('#6A4A33');
+const TRUNK_COLOR = new THREE.Color(TREES.trunk);
 
 function makeCanvas(size, readable = false) {
   const c = document.createElement('canvas');
@@ -100,21 +100,6 @@ export function despike(h) {
     }
   }
   return out;
-}
-
-// Tree shape with its trunk merged in, so one instanced draw covers both.
-// `aTrunk` marks trunk vertices; the tile material colours them brown.
-function treeGeometry(crown) {
-  const trunk = new THREE.CylinderGeometry(0.35, 0.5, 2.6, 5, 1, true).translate(0, 1.3, 0).toNonIndexed();
-  const top = crown.index ? crown.toNonIndexed() : crown;
-  const parts = [top, trunk];
-  parts.forEach((g, i) => {
-    g.deleteAttribute('uv');
-    g.setAttribute('aTrunk', new THREE.Float32BufferAttribute(new Float32Array(g.attributes.position.count).fill(i), 1));
-  });
-  const merged = mergeGeometries(parts, false);
-  merged.computeBoundingSphere();
-  return merged;
 }
 
 // All areas of one decor kind in a tile: one clip path plus its bounding box.
@@ -182,8 +167,9 @@ export class TileManager {
     this.lastStatus = '';
 
     // shared tree geometry (metres)
-    this.pineGeo = treeGeometry(new THREE.ConeGeometry(2.3, 7.5, 6).translate(0, 6, 0));
-    this.roundGeo = treeGeometry(new THREE.IcosahedronGeometry(3.1, 0).translate(0, 5.2, 0));
+    this.pineGeo = pineGeometry();
+    this.roundGeo = roundGeometry();
+    this.palmGeo = palmGeometry();
     this.terracePatterns = new Map();
   }
 
@@ -568,7 +554,7 @@ export class TileManager {
     if (t.cancelled) return this.discard(t);
 
     // 4. trees
-    this.buildTrees(t, paint.density, rand, fogOpts);
+    this.buildTrees(t, paint, rand, fogOpts);
     await nextFrame();
     if (t.cancelled) return this.discard(t);
 
@@ -681,15 +667,21 @@ export class TileManager {
     c.restore();
   }
 
-  // Paints the ground texture, a water mask (for shimmer) and a tree density map.
+  // Paints the ground texture, a water mask (for shimmer), a tree density map and
+  // a palm map (where palms may grow).
   // Yields a frame between layer groups; returns null if the tile was unloaded meanwhile.
   async paint(t, vt, size, tm, rand) {
     const { canvas: color, ctx: c } = makeCanvas(size);
     const { canvas: water, ctx: w } = makeCanvas(256);
     const { canvas: dens, ctx: d } = makeCanvas(128, true);
+    // where palms may grow: white = anywhere, grey = only at low elevation
+    const { ctx: pm } = makeCanvas(128, true);
     c.lineJoin = c.lineCap = 'round';
     w.lineJoin = w.lineCap = 'round';
     d.lineJoin = d.lineCap = 'round';
+    pm.lineJoin = pm.lineCap = 'round';
+    pm.fillStyle = '#000';
+    pm.fillRect(0, 0, 128, 128);
 
     c.fillStyle = GROUND.base;
     c.fillRect(0, 0, size, size);
@@ -711,7 +703,7 @@ export class TileManager {
     d.fillStyle = `rgb(${g0},${g0},${g0})`;
     d.fillRect(0, 0, 128, 128);
 
-    const result = { color, water, density: null };
+    const result = { color, water, density: null, palm: null };
     if (!vt) {
       result.density = d.getImageData(0, 0, 128, 128).data;
       return result;
@@ -771,7 +763,13 @@ export class TileManager {
         d.fillStyle = grey(r.trees);
         d.fill('evenodd');
       }
+      if (r.palms) {
+        path(pm, geom, 128 / ext, true);
+        pm.fillStyle = r.palms === 'low' ? '#808080' : '#fff';
+        pm.fill('evenodd');
+      }
     };
+    const palmReach = (2 * TREES.palmWaterDistance * 128) / tm; // stroke width reaching that far from the shore
 
     // land
     each('landcover', 3, (f, g, ext) => {
@@ -800,6 +798,10 @@ export class TileManager {
       path(d, g, 128 / ext, true);
       d.fillStyle = '#000';
       d.fill('evenodd');
+      path(pm, g, 128 / ext, true);
+      pm.strokeStyle = '#808080'; // shores: palms only at low elevation
+      pm.lineWidth = palmReach;
+      pm.stroke();
     });
     const m = size / tm;
     each('waterway', 2, (f, g, ext) => {
@@ -817,6 +819,12 @@ export class TileManager {
       d.strokeStyle = '#000';
       d.lineWidth = ((wid + 6) * 128) / tm + 0.5;
       d.stroke();
+      if (wid >= WATERWAY.stream) {
+        path(pm, g, 128 / ext, false);
+        pm.strokeStyle = '#808080';
+        pm.lineWidth = palmReach * 0.5; // streams and rivers: palms along the banks, not as far out
+        pm.stroke();
+      }
     });
     if (!(await step())) return null;
 
@@ -880,6 +888,7 @@ export class TileManager {
     });
 
     result.density = d.getImageData(0, 0, 128, 128).data;
+    result.palm = pm.getImageData(0, 0, 128, 128).data;
     return result;
   }
 
@@ -890,19 +899,26 @@ export class TileManager {
     t.cullables.push({ obj, kind, x: t.origin.x + (ci + 0.5) * cs, z: t.origin.z + (cj + 0.5) * cs, r: cs * 0.7072 + 10 });
   }
 
-  buildTrees(t, density, rand, fogOpts) {
+  // Which kind of tree grows at (u, v): 0 pine, 1 round, 2 palm (see TREES).
+  treeKind(paint, di, dj, h, rand) {
+    const pv = paint.palm ? paint.palm[(dj * 128 + di) * 4] : 0;
+    const palmOk = pv > 200 || (pv > 100 && h / CONFIG.heightScale < TREES.palmMaxElevation);
+    if (palmOk && rand() < TREES.palmShare) return 2;
+    return rand() < TREES.pineShare ? 0 : 1;
+  }
+
+  buildTrees(t, paint, rand, fogOpts) {
     const q = this.quality;
     const tm = this.proj.tileMeters;
     const C = CONFIG.chunksPerTile;
     const max = q.trees;
+    const density = paint.density;
     // one material for leaves and trunks: the trunk colour comes from the shader
     const mat = patchTileMaterial(this.material({ color: '#ffffff', flatShading: true, roughness: 0.85 }), this.fog, { ...fogOpts, trunkColor: TRUNK_COLOR });
     t.disposables.push(mat);
 
-    const species = [
-      { geo: this.pineGeo, m: new Float32Array(max * 16), c: new Float32Array(max * 3), k: new Uint8Array(max), n: 0 },
-      { geo: this.roundGeo, m: new Float32Array(max * 16), c: new Float32Array(max * 3), k: new Uint8Array(max), n: 0 },
-    ];
+    const kind = (geo, colors) => ({ geo, colors, m: new Float32Array(max * 16), c: new Float32Array(max * 3), k: new Uint8Array(max), n: 0 });
+    const species = [kind(this.pineGeo, TREES.colors), kind(this.roundGeo, TREES.colors), kind(this.palmGeo, TREES.palmColors)];
     const mtx = new THREE.Matrix4();
     const quat = new THREE.Quaternion();
     const scl = new THREE.Vector3();
@@ -910,52 +926,55 @@ export class TileManager {
     const col = new THREE.Color();
     const up = new THREE.Vector3(0, 1, 0);
     const attempts = max * 4;
-    for (let a = 0; a < attempts && species[0].n + species[1].n < max; a++) {
+    let placed = 0;
+    for (let a = 0; a < attempts && placed < max; a++) {
       const u = rand();
       const v = rand();
       const di = Math.min(127, Math.floor(u * 128));
       const dj = Math.min(127, Math.floor(v * 128));
-      const dens = density[(dj * 128 + di) * 4];
-      if (rand() * 255 >= dens) continue;
+      if (rand() * 255 >= density[(dj * 128 + di) * 4]) continue;
       const h = this.sampleGrid(t, u, v);
       if (h <= CONFIG.minHeight * CONFIG.heightScale + 0.5) continue; // sea
+      const sp = species[this.treeKind(paint, di, dj, h, rand)];
       const s = 0.8 + rand() * 0.8;
       p.set(u * tm, h - 0.4, v * tm);
       quat.setFromAxisAngle(up, rand() * Math.PI * 2);
       scl.set(s, s * (0.85 + rand() * 0.4), s);
       mtx.compose(p, quat, scl);
-      col.set(TREES.colors[Math.floor(rand() * TREES.colors.length)]).offsetHSL(0, 0, (rand() - 0.5) * 0.06);
-      const sp = rand() < TREES.pineShare ? species[0] : species[1];
+      col.set(sp.colors[Math.floor(rand() * sp.colors.length)]).offsetHSL(0, 0, (rand() - 0.5) * 0.06);
       mtx.toArray(sp.m, sp.n * 16);
       col.toArray(sp.c, sp.n * 3);
       sp.k[sp.n] = Math.min(C - 1, Math.floor(v * C)) * C + Math.min(C - 1, Math.floor(u * C));
       sp.n++;
+      placed++;
     }
+    for (const sp of species) this.addTreeChunks(t, sp, mat);
+  }
 
-    // one instanced mesh per species per chunk, sized to exactly the trees in it
-    for (const sp of species) {
-      const counts = new Uint32Array(C * C);
-      for (let i = 0; i < sp.n; i++) counts[sp.k[i]]++;
-      for (let chunk = 0; chunk < C * C; chunk++) {
-        const n = counts[chunk];
-        if (!n) continue;
-        const im = new THREE.InstancedMesh(sp.geo, mat, n);
-        const colors = new Float32Array(n * 3);
-        const mats = im.instanceMatrix.array;
-        let w = 0;
-        for (let i = 0; i < sp.n; i++) {
-          if (sp.k[i] !== chunk) continue;
-          mats.set(sp.m.subarray(i * 16, i * 16 + 16), w * 16);
-          colors.set(sp.c.subarray(i * 3, i * 3 + 3), w * 3);
-          w++;
-        }
-        im.instanceColor = new THREE.InstancedBufferAttribute(colors, 3);
-        im.computeBoundingSphere(); // lets the camera and shadow pass skip off-screen chunks
-        im.castShadow = q.shadows;
-        im.receiveShadow = q.shadows;
-        this.addChunk(t, im, chunk % C, Math.floor(chunk / C), 'tree');
-        t.disposables.push(im);
+  // One instanced mesh per species per chunk, sized to exactly the trees in it.
+  addTreeChunks(t, sp, mat) {
+    const C = CONFIG.chunksPerTile;
+    const counts = new Uint32Array(C * C);
+    for (let i = 0; i < sp.n; i++) counts[sp.k[i]]++;
+    for (let chunk = 0; chunk < C * C; chunk++) {
+      const n = counts[chunk];
+      if (!n) continue;
+      const im = new THREE.InstancedMesh(sp.geo, mat, n);
+      const colors = new Float32Array(n * 3);
+      const mats = im.instanceMatrix.array;
+      let w = 0;
+      for (let i = 0; i < sp.n; i++) {
+        if (sp.k[i] !== chunk) continue;
+        mats.set(sp.m.subarray(i * 16, i * 16 + 16), w * 16);
+        colors.set(sp.c.subarray(i * 3, i * 3 + 3), w * 3);
+        w++;
       }
+      im.instanceColor = new THREE.InstancedBufferAttribute(colors, 3);
+      im.computeBoundingSphere(); // lets the camera and shadow pass skip off-screen chunks
+      im.castShadow = this.quality.shadows;
+      im.receiveShadow = this.quality.shadows;
+      this.addChunk(t, im, chunk % C, Math.floor(chunk / C), 'tree');
+      t.disposables.push(im);
     }
   }
 

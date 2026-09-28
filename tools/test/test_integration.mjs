@@ -51,7 +51,22 @@ for (const tier of ['high', 'low']) {
   const t = tm.byNum.get(tiles[4].num);
   const trees = t.cullables.filter((c) => c.kind === 'tree'), blds = t.cullables.filter((c) => c.kind === 'building');
   const inst = trees.reduce((a, c) => a + c.obj.count, 0);
-  ok(trees.length > 0 && trees.length <= 32, `tree chunks (pine+round per chunk) ${trees.length}, instances ${inst}`);
+  ok(trees.length > 0 && trees.length <= 48, `tree chunks (pine+round+palm per chunk) ${trees.length}, instances ${inst}`);
+  ok(inst <= q.trees, `tree cap held (${inst} <= ${q.trees})`);
+  const kinds = new Set(trees.map((c) => c.obj.geometry));
+  ok(kinds.size >= 2 && [...kinds].every((g) => [tm.pineGeo, tm.roundGeo, tm.palmGeo].includes(g)), `tree kinds in use: ${kinds.size}`);
+  // palm rule: white palm map = palms anywhere; grey = only below palmMaxElevation; black = none
+  {
+    const { TREES } = await import('./app/rules.mjs');
+    const palmMap = (v) => ({ palm: new Uint8ClampedArray(128 * 128 * 4).fill(v) });
+    let r = 1; const rnd = () => ((r = (r * 16807) % 2147483647) / 2147483647);
+    const count = (paint, h) => { let n = 0; for (let i = 0; i < 1000; i++) if (tm.treeKind(paint, 5, 5, h, rnd) === 2) n++; return n; };
+    const lowH = (TREES.palmMaxElevation - 20) * CONFIG.heightScale, highH = (TREES.palmMaxElevation + 200) * CONFIG.heightScale;
+    const any = count(palmMap(255), highH), lowTown = count(palmMap(128), lowH), highTown = count(palmMap(128), highH), none = count(palmMap(0), lowH);
+    ok(Math.abs(any / 1000 - TREES.palmShare) < 0.06 && lowTown > 500 && highTown === 0 && none === 0 && count({ palm: null }, lowH) === 0,
+      `palm rule: sand/shore ${any}, low town ${lowTown}, high town ${highTown}, elsewhere ${none} (of 1000)`);
+    ok(tm.palmGeo.boundingSphere && tm.palmGeo.attributes.aTrunk && tm.palmGeo.attributes.position.count > 0, `palm geometry ${tm.palmGeo.attributes.position.count} vertices`);
+  }
   ok(trees.every((c) => c.obj.count > 0 && c.obj.frustumCulled !== false && c.obj.geometry.boundingSphere), 'tree chunks non-empty, frustum culled, with bounds');
   ok(blds.length > 0 && blds.length <= 16, `building chunks ${blds.length}`);
   const bv = blds.reduce((a, c) => a + c.obj.geometry.attributes.position.count, 0);

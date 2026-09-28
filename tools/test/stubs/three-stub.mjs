@@ -60,6 +60,7 @@ export class BufferGeometry extends EventTarget {
   setIndex(i) { this.index = new BufferAttribute(new Uint32Array(i), 1); return this; }
   applyFn(fn) { const p = this.attributes.position; for (let i = 0; i < p.count; i++) { const [x, y, z] = fn(p.array[i * 3], p.array[i * 3 + 1], p.array[i * 3 + 2]); p.array[i * 3] = x; p.array[i * 3 + 1] = y; p.array[i * 3 + 2] = z; } return this; }
   translate(x, y, z) { return this.applyFn((a, b, c) => [a + x, b + y, c + z]); }
+  scale(x, y, z) { return this.applyFn((a, b, c) => [a * x, b * y, c * z]); }
   rotateX(ang) { const c = Math.cos(ang), s = Math.sin(ang); return this.applyFn((x, y, z) => [x, y * c - z * s, y * s + z * c]); }
   toNonIndexed() {
     if (!this.index) return this;

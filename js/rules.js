@@ -25,20 +25,22 @@ export const GROUND = { base: '#8FD35B', speckleA: '#7FC64E', speckleB: '#A6E06E
 
 // `trees` is tree density from 0 (none) to 255 (dense forest).
 // `decor: 'town'` scatters grass tufts and flowers over the area (see DECOR).
+// `palms: 'always' | 'low'` lets palms grow there ('low': only below
+// TREES.palmMaxElevation). Land near water gets palms too (TREES.palmWaterDistance).
 export const LANDCOVER = {
   wood: { fill: '#3FA650', trees: 235 },
   grass: { fill: '#A8E06A', trees: 35 },
   farmland: { fill: '#9BD65A', stripe: '#6FB847', trees: 10, pattern: 'terrace' }, // tea estates and fields
   wetland: { fill: '#6FC39A', trees: 30 },
-  sand: { fill: '#FFE3A1', trees: 3 },
+  sand: { fill: '#FFE3A1', trees: 3, palms: 'always' },
   rock: { fill: '#B9B2A6', trees: 0 },
   ice: { fill: '#F2F8FB', trees: 0 },
 };
 
 export const LANDUSE = {
-  residential: { fill: '#F2DDB0', trees: 45, decor: 'town' },
-  suburb: { fill: '#F2DDB0', trees: 45, decor: 'town' },
-  neighbourhood: { fill: '#F2DDB0', trees: 45, decor: 'town' },
+  residential: { fill: '#F2DDB0', trees: 45, decor: 'town', palms: 'low' },
+  suburb: { fill: '#F2DDB0', trees: 45, decor: 'town', palms: 'low' },
+  neighbourhood: { fill: '#F2DDB0', trees: 45, decor: 'town', palms: 'low' },
   commercial: { fill: '#F7CFA0', trees: 10, decor: 'town' },
   retail: { fill: '#F7CFA0', trees: 10, decor: 'town' },
   industrial: { fill: '#D7D0C4', trees: 5 },
@@ -122,9 +124,18 @@ export const BUILDING = {
 
 /* ---------- trees ---------- */
 export const TREES = {
-  colors: ['#2F7D46', '#3C9150', '#4FA35A', '#2A6B3F', '#5BAF5E', '#468F3F'],
+  colors: ['#3FA650', '#4DBA5C', '#5CC96A', '#2F9446', '#7BD86A'],
+  trunk: '#8B5E3C',
   unmappedDensity: 30, // a few trees wherever the map has no data
   pineShare: 0.55,
+  // Palms grow where trees may grow and the land is sand, or below
+  // palmMaxElevation metres within palmWaterDistance metres of water or the coast
+  // or in towns (hill-country streams get no palms). There, palmShare of the
+  // trees are palms.
+  palmColors: ['#4CC26A', '#5ACF74', '#43B560'],
+  palmShare: 0.65,
+  palmWaterDistance: 300,
+  palmMaxElevation: 80,
 };
 
 /* ---------- places (crystals) ---------- */
