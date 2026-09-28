@@ -102,6 +102,8 @@ export const PRESETS = [
 //   lambert        cheaper lighting for tiles (no specular); used on weak phones
 //   shadows        sun shadows; shadowMapSize is the shadow texture size
 //   bloom          glow post-processing; bloomScale shrinks its buffers (0.5 = quarter the pixels)
+//   fogClouds      soft cloud puffs floating over unexplored land
+//   parapets       low lip around flat roofs (extra geometry on big buildings)
 //   pixelRatio     starting render resolution; minPixelRatio is the floor for automatic steps
 //   maxFps         frame-rate cap, so 90/120 Hz screens don't render frames nobody needs
 //   adaptive       step quality down automatically if the frame rate stays low
@@ -141,6 +143,8 @@ export function detectQuality(override, extra = {}) {
       shadowMapSize: 1024,
       bloom: false,
       bloomScale: 0.5,
+      fogClouds: false,
+      parapets: true,
       pixelRatio: Math.min(dpr, 1.25),
       minPixelRatio: Math.min(dpr, 0.75),
       maxFps,
@@ -161,6 +165,8 @@ export function detectQuality(override, extra = {}) {
     shadowMapSize: mobile ? 1024 : 2048,
     bloom: true,
     bloomScale: mobile ? 0.5 : 1,
+    fogClouds: true,
+    parapets: true,
     pixelRatio: Math.min(dpr, mobile ? 1.75 : 2),
     minPixelRatio: Math.min(dpr, 1),
     maxFps,

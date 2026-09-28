@@ -21,68 +21,89 @@ export const RARITY = {
 
 /* ---------- ground ---------- */
 // Used where the map has nothing: a meadow, so there are never empty holes.
-export const GROUND = { base: '#93CF66', speckleA: '#86C45C', speckleB: '#A2D873' };
+export const GROUND = { base: '#8FD35B', speckleA: '#7FC64E', speckleB: '#A6E06E' };
 
 // `trees` is tree density from 0 (none) to 255 (dense forest).
+// `decor: 'town'` scatters grass tufts and flowers over the area (see DECOR).
+// `palms: 'always' | 'low'` lets palms grow there ('low': only below
+// TREES.palmMaxElevation). Land near water gets palms too (TREES.palmWaterDistance).
 export const LANDCOVER = {
-  wood: { fill: '#3F8C4B', trees: 235 },
-  grass: { fill: '#A3D86C', trees: 35 },
-  farmland: { fill: '#B5D26A', trees: 10, pattern: 'terrace' }, // tea estates and fields
-  wetland: { fill: '#6FB08E', trees: 30 },
-  sand: { fill: '#EBD6A0', trees: 3 },
-  rock: { fill: '#A9A293', trees: 0 },
-  ice: { fill: '#EEF5F8', trees: 0 },
+  wood: { fill: '#3FA650', trees: 235 },
+  grass: { fill: '#A8E06A', trees: 35 },
+  farmland: { fill: '#9BD65A', stripe: '#6FB847', trees: 10, pattern: 'terrace' }, // tea estates and fields
+  wetland: { fill: '#6FC39A', trees: 30 },
+  sand: { fill: '#FFE3A1', trees: 3, palms: 'always' },
+  rock: { fill: '#B9B2A6', trees: 0 },
+  ice: { fill: '#F2F8FB', trees: 0 },
 };
 
 export const LANDUSE = {
-  residential: { fill: '#D9CFA7', trees: 45 },
-  suburb: { fill: '#D9CFA7', trees: 45 },
-  neighbourhood: { fill: '#D9CFA7', trees: 45 },
-  commercial: { fill: '#E3CAA5', trees: 10 },
-  retail: { fill: '#E3CAA5', trees: 10 },
-  industrial: { fill: '#C9C0B0', trees: 5 },
-  garages: { fill: '#C9C0B0', trees: 0 },
-  railway: { fill: '#C4B8A2', trees: 0 },
-  cemetery: { fill: '#95B97A', trees: 60 },
-  hospital: { fill: '#E7D7C5', trees: 15 },
-  school: { fill: '#E7D7B3', trees: 20 },
-  college: { fill: '#E7D7B3', trees: 20 },
-  university: { fill: '#E7D7B3', trees: 25 },
-  kindergarten: { fill: '#E7D7B3', trees: 15 },
-  stadium: { fill: '#7CC46A', trees: 0 },
-  pitch: { fill: '#7CC46A', trees: 0 },
-  playground: { fill: '#A8D878', trees: 20 },
-  track: { fill: '#D7A77A', trees: 0 },
-  military: { fill: '#B9B8A0', trees: 20 },
-  quarry: { fill: '#BDB3A1', trees: 0 },
-  zoo: { fill: '#B6DA7C', trees: 70 },
-  theme_park: { fill: '#B6DA7C', trees: 40 },
-  dam: { fill: '#BDB6A8', trees: 0 },
+  residential: { fill: '#F2DDB0', trees: 45, decor: 'town', palms: 'low' },
+  suburb: { fill: '#F2DDB0', trees: 45, decor: 'town', palms: 'low' },
+  neighbourhood: { fill: '#F2DDB0', trees: 45, decor: 'town', palms: 'low' },
+  commercial: { fill: '#F7CFA0', trees: 10, decor: 'town' },
+  retail: { fill: '#F7CFA0', trees: 10, decor: 'town' },
+  industrial: { fill: '#D7D0C4', trees: 5 },
+  garages: { fill: '#D7D0C4', trees: 0 },
+  railway: { fill: '#D9CDB6', trees: 0 },
+  cemetery: { fill: '#9ACB7C', trees: 60 },
+  hospital: { fill: '#F4E1CF', trees: 15, decor: 'town' },
+  school: { fill: '#F4E2BC', trees: 20, decor: 'town' },
+  college: { fill: '#F4E2BC', trees: 20, decor: 'town' },
+  university: { fill: '#F4E2BC', trees: 25, decor: 'town' },
+  kindergarten: { fill: '#F4E2BC', trees: 15, decor: 'town' },
+  stadium: { fill: '#7FD35A', trees: 0 },
+  pitch: { fill: '#7FD35A', trees: 0 },
+  playground: { fill: '#A8E06A', trees: 20 },
+  track: { fill: '#EDA97A', trees: 0 },
+  military: { fill: '#C6C4A6', trees: 20 },
+  quarry: { fill: '#CFC5B3', trees: 0 },
+  zoo: { fill: '#A8E06A', trees: 70 },
+  theme_park: { fill: '#A8E06A', trees: 40 },
+  dam: { fill: '#CFC8BA', trees: 0 },
 };
 
-export const PARK = { fill: '#8ED063', stroke: '#6FB54E', trees: 110 };
+export const PARK = { fill: '#7FD35A', trees: 110 };
+
+// How painted areas are finished. Sizes are fractions of the ground texture size,
+// so low and high quality textures look alike.
+//   edge       soft darker band inside every land area, so areas read as shapes
+//   edgeDarken how much darker than the fill the band is (0–1)
+export const PAINT = { edge: 1 / 340, edgeDarken: 0.16 };
+
+// Grass tufts and flower dots scattered over areas with `decor: 'town'`, so towns
+// aren't flat cream. Counts are for a whole tile; sizes are radii in texels of a
+// 1024 texture (about 2.4 m each).
+export const DECOR = {
+  town: {
+    patches: { colors: ['#B9E68A', '#A6E06E'], count: 1800, size: [2.5, 6], alpha: 0.75 },
+    tufts: { colors: ['#7FC64E', '#8FD35B'], count: 5000, size: [1, 2] },
+    flowers: { colors: ['#FF8FB1', '#FFE066', '#FFFFFF', '#FFB36B'], count: 3500, size: [0.7, 1.1] },
+  },
+};
 
 /* ---------- water ---------- */
-export const WATER = { fill: '#3AA9D8', shore: '#9ED9EE' };
+export const WATER = { fill: '#35B6EC', shore: '#E9FBFF' };
 // Width in metres by waterway class.
 export const WATERWAY = { river: 14, canal: 10, stream: 4, drain: 2.5, ditch: 2 };
 
 /* ---------- roads and railways ---------- */
 // Width in metres. `dash` draws a dashed trail instead of a solid road.
+// `centre` draws a faint dashed centre line in that colour.
 export const ROADS = {
-  motorway: { w: 18, fill: '#FFD978', casing: '#C8962E' },
-  trunk: { w: 16, fill: '#FFDF8C', casing: '#C8962E' },
-  primary: { w: 13, fill: '#FFF0C4', casing: '#C7A870' },
-  secondary: { w: 11, fill: '#FFF4D6', casing: '#C7AE80' },
-  tertiary: { w: 9, fill: '#FBF3DE', casing: '#C9B48C' },
-  minor: { w: 7, fill: '#F6EEDA', casing: '#C9BA96' },
-  service: { w: 5, fill: '#F2EAD6', casing: '#C9BA96' },
-  busway: { w: 9, fill: '#FBF3DE', casing: '#C9B48C' },
-  raceway: { w: 10, fill: '#E7C9A2', casing: '#B28F63' },
-  track: { w: 3.5, fill: '#D6BE8E', dash: [6, 5] },
-  path: { w: 2.2, fill: '#EFE1B6', dash: [3, 3] },
+  motorway: { w: 18, fill: '#FFE89A', casing: '#E5A94A', centre: '#F2C66E' },
+  trunk: { w: 16, fill: '#FFEFB0', casing: '#E5B05A', centre: '#F2C66E' },
+  primary: { w: 13, fill: '#FFF7E0', casing: '#E5B96A', centre: '#F0CD8A' },
+  secondary: { w: 11, fill: '#FFF7E0', casing: '#E5B96A', centre: '#F0CD8A' },
+  tertiary: { w: 9, fill: '#FFFDF4', casing: '#E8D2A8' },
+  minor: { w: 7, fill: '#FFFDF4', casing: '#E8D2A8' },
+  service: { w: 5, fill: '#FFFDF4', casing: '#E8D2A8' },
+  busway: { w: 9, fill: '#FFFDF4', casing: '#E8D2A8' },
+  raceway: { w: 10, fill: '#F7D6AE', casing: '#D9A36A' },
+  track: { w: 3.5, fill: '#EDD29C', dash: [6, 5] },
+  path: { w: 2.2, fill: '#F6E3B4', dash: [3, 3] },
 };
-export const RAIL = { w: 4, fill: '#7A5E44', tie: '#4F3B2A', classes: ['rail', 'transit'] };
+export const RAIL = { w: 4, fill: '#8B5E3C', tie: '#5B3A24', classes: ['rail', 'transit'] };
 
 /* ---------- buildings ---------- */
 export const BUILDING = {
@@ -90,16 +111,31 @@ export const BUILDING = {
   minHeight: 3.5,
   maxHeight: 90,
   minArea: 12, // square metres; smaller shapes are skipped
-  footprint: '#B4A588',
-  walls: ['#F4EEE2', '#EFE3CC', '#F7D9C4', '#DDEBE6', '#F1E6B8', '#E9E4F2'],
-  roofs: ['#C2573A', '#A8452F', '#3F7F8C', '#6C8F4E', '#B5654A', '#8D5A9E'],
+  footprint: '#D9C7A2',
+  walls: ['#FFF6E6', '#FFE9D1', '#FDE2E4', '#E3F4F1', '#FFF2C2', '#EDE7FF'],
+  roofs: ['#E4572E', '#F08A4B', '#3FA7A1', '#5B8DEF', '#C4453D', '#8E6CCB'],
+  gableMaxArea: 400, // m²; smaller (nearly) rectangular buildings get a pitched roof
+  parapet: 0.4, // m; lip around flat roofs
+  rimDarken: 0.25, // parapet colour: roof colour this much darker
+  plinth: { height: 0.8, darken: 0.25 }, // darker band at the foot of the walls
+  // Windows are drawn by the building shader, not modelled. Metres.
+  windows: { floorHeight: 3.2, spacing: 3.0, width: 1.2, height: 1.4, sill: 1.0, topGap: 0.6, day: '#5A7BA8', night: '#FFD98A', litShare: 0.4 },
 };
 
 /* ---------- trees ---------- */
 export const TREES = {
-  colors: ['#2F7D46', '#3C9150', '#4FA35A', '#2A6B3F', '#5BAF5E', '#468F3F'],
+  colors: ['#3FA650', '#4DBA5C', '#5CC96A', '#2F9446', '#7BD86A'],
+  trunk: '#8B5E3C',
   unmappedDensity: 30, // a few trees wherever the map has no data
   pineShare: 0.55,
+  // Palms grow where trees may grow and the land is sand, or below
+  // palmMaxElevation metres within palmWaterDistance metres of water or the coast
+  // or in towns (hill-country streams get no palms). There, palmShare of the
+  // trees are palms.
+  palmColors: ['#4CC26A', '#5ACF74', '#43B560'],
+  palmShare: 0.65,
+  palmWaterDistance: 300,
+  palmMaxElevation: 80,
 };
 
 /* ---------- places (crystals) ---------- */
@@ -152,6 +188,23 @@ export function classifyPlace(layer, p) {
   return null;
 }
 
+/* ---------- fog of war ---------- */
+// Unexplored land is covered by a drifting cloud veil. The veil is see-through
+// on purpose: the player should still make out hills, rivers and towns ahead.
+//   cloud / shadow  colours of the veil in daylight (other times: TIMES[].fow)
+//   veil            how much the cloud covers unexplored land (0 clear – 1 solid)
+//   edge            glow where fog is being cleared
+//   sparkle         burst colour when you clear fog
+//   billboards      soft cloud puffs floating over unexplored land (high quality)
+export const FOG = {
+  cloud: '#E9E6FF',
+  shadow: '#B9B2E8',
+  veil: 0.62,
+  edge: '#8FF0DC',
+  sparkle: '#C9B8FF',
+  billboards: { max: 20, size: [70, 130], height: [45, 80], spawnRadius: [170, 520] },
+};
+
 /* ---------- gameplay ---------- */
 export const GAMEPLAY = {
   claimRadius: { gps: 40, explore: 35 }, // metres
@@ -175,10 +228,10 @@ export function titleFor(level) {
 
 /* ---------- time of day ---------- */
 export const TIMES = [
-  { name: 'Dawn', top: '#34508E', hor: '#F7C49A', sunC: '#FFC89A', sunI: 1.5, dir: [0.9, 0.32, -0.2], hemiS: '#FFE0C8', hemiG: '#40583E', hemiI: 0.85, fow: '#1B2240', exp: 1.0, stars: 0, bloom: 0.5 },
-  { name: 'Day', top: '#3C8EE6', hor: '#C6E9F7', sunC: '#FFF4E0', sunI: 2.4, dir: [0.35, 1, 0.3], hemiS: '#DDF0FF', hemiG: '#5C7A48', hemiI: 1.05, fow: '#1D2A44', exp: 1.0, stars: 0, bloom: 0.32 },
-  { name: 'Golden hour', top: '#3A3F82', hor: '#F59F6E', sunC: '#FFB27A', sunI: 2.0, dir: [-0.85, 0.38, 0.25], hemiS: '#FFD9C0', hemiG: '#3A553A', hemiI: 0.9, fow: '#171C38', exp: 1.05, stars: 0.15, bloom: 0.55 },
-  { name: 'Night', top: '#050A1C', hor: '#1B2B4E', sunC: '#9DB4FF', sunI: 0.55, dir: [0.3, 0.8, -0.4], hemiS: '#6F86C8', hemiG: '#10182A', hemiI: 0.5, fow: '#060B16', exp: 0.95, stars: 1, bloom: 0.9 },
+  { name: 'Dawn', top: '#34508E', hor: '#F7C49A', sunC: '#FFC89A', sunI: 1.5, dir: [0.9, 0.32, -0.2], hemiS: '#FFE0C8', hemiG: '#40583E', hemiI: 0.85, fow: '#F3DCEB', exp: 1.0, stars: 0, bloom: 0.5, win: 0.35 },
+  { name: 'Day', top: '#3C8EE6', hor: '#C6E9F7', sunC: '#FFF4E0', sunI: 2.4, dir: [0.35, 1, 0.3], hemiS: '#DDF0FF', hemiG: '#5C7A48', hemiI: 1.05, fow: '#E9E6FF', exp: 1.0, stars: 0, bloom: 0.32, win: 0 },
+  { name: 'Golden hour', top: '#3A3F82', hor: '#F59F6E', sunC: '#FFB27A', sunI: 2.0, dir: [-0.85, 0.38, 0.25], hemiS: '#FFD9C0', hemiG: '#3A553A', hemiI: 0.9, fow: '#F4D6E2', exp: 1.05, stars: 0.15, bloom: 0.55, win: 0.3 },
+  { name: 'Night', top: '#050A1C', hor: '#1B2B4E', sunC: '#9DB4FF', sunI: 0.55, dir: [0.3, 0.8, -0.4], hemiS: '#6F86C8', hemiG: '#10182A', hemiI: 0.5, fow: '#4B4E8C', exp: 0.95, stars: 1, bloom: 0.9, win: 1 },
 ];
 // Follows the real local clock by default.
 export function timeIndexForHour(h) {

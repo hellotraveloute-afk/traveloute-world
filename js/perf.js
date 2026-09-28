@@ -3,7 +3,7 @@
 // so the world never flip-flops between settings.
 //
 // Order: bloom off -> lower resolution -> shadows off -> lower resolution again
-//        -> shorter tree distance.
+//        -> shorter tree distance -> art extras (fog clouds, ...).
 //
 // Frame-rate windows are skipped while a tile is being built or after a long
 // pause (tab hidden, app in background), so loading hitches don't count.
@@ -53,6 +53,8 @@ export class QualityGovernor {
     for (const dist of [1000, 650]) {
       if (dist < q.treeDistance) steps.push({ name: `trees to ${dist} m`, run: () => (q.treeDistance = dist) });
     }
+    // art pass extras, lightest loss first
+    if (q.fogClouds) steps.push({ name: 'fog clouds off', run: () => (q.fogClouds = false) });
     return steps;
   }
 

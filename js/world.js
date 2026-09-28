@@ -128,11 +128,11 @@ export function createWorld(canvas, quality, fog) {
   }
 
   // time of day
-  const now = { top: new THREE.Color(), hor: new THREE.Color(), sunC: new THREE.Color(), hemiS: new THREE.Color(), hemiG: new THREE.Color(), fow: new THREE.Color(), dir: new THREE.Vector3(), sunI: 0, hemiI: 0, exp: 1, stars: 0, bloom: 0.5 };
+  const now = { top: new THREE.Color(), hor: new THREE.Color(), sunC: new THREE.Color(), hemiS: new THREE.Color(), hemiG: new THREE.Color(), fow: new THREE.Color(), dir: new THREE.Vector3(), sunI: 0, hemiI: 0, exp: 1, stars: 0, bloom: 0.5, win: 0 };
   let from = null;
   let t = 1;
   const COLOR_KEYS = ['top', 'hor', 'sunC', 'hemiS', 'hemiG', 'fow'];
-  const NUM_KEYS = ['sunI', 'hemiI', 'exp', 'stars', 'bloom'];
+  const NUM_KEYS = ['sunI', 'hemiI', 'exp', 'stars', 'bloom', 'win'];
 
   function push() {
     skyU.top.value.copy(now.top);
@@ -147,6 +147,9 @@ export function createWorld(canvas, quality, fog) {
     hemi.groundColor.copy(now.hemiG);
     hemi.intensity = now.hemiI;
     fog.uniforms.uFowColor.value.copy(now.fow);
+    fog.uniforms.uSunDir.value.copy(now.dir);
+    fog.uniforms.uNight.value = now.win;
+    fog.uniforms.uSunColor.value.copy(now.sunC).multiplyScalar(Math.min(1, now.sunI / 2));
     renderer.toneMappingExposure = now.exp;
     starMat.opacity = now.stars;
     stars.visible = now.stars > 0.01; // 1,500 points skipped in daylight

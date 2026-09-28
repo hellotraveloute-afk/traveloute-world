@@ -4,8 +4,45 @@
 import * as THREE from 'three';
 import { loadBytes, saveBytes } from './storage.js';
 import { smooth } from './util.js';
+import { BUILDING, FOG, LANDCOVER, WATER } from './rules.js';
 
 export const FOG_RES = 128;
+
+// A small tiling value-noise texture for the cloud veil: two texture reads per
+// pixel are much cheaper on phone GPUs than computing noise in the shader.
+function noiseTexture(size = 64, cell = 8) {
+  let s = 12345;
+  const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+  const g = cell; // lattice points per side (wraps)
+  const lattice = Array.from({ length: g * g }, rnd);
+  const at = (i, j) => lattice[((j + g) % g) * g + ((i + g) % g)];
+  const data = new Uint8Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const fx = (x / size) * g;
+      const fy = (y / size) * g;
+      const i = Math.floor(fx);
+      const j = Math.floor(fy);
+      const u = smooth(0, 1, fx - i);
+      const v = smooth(0, 1, fy - j);
+      const a = at(i, j) + (at(i + 1, j) - at(i, j)) * u;
+      const b = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * u;
+      data[y * size + x] = Math.round((a + (b - a) * v) * 255);
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size, THREE.RedFormat, THREE.UnsignedByteType);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function cloudShadowRatio() {
+  const a = new THREE.Color(FOG.cloud);
+  const b = new THREE.Color(FOG.shadow);
+  return [b.r / a.r, b.g / a.g, b.b / a.b];
+}
 
 export class FogOfWar {
   constructor(proj) {
@@ -13,7 +50,20 @@ export class FogOfWar {
     this.grids = new Map();
     this.textures = new Map(); // key -> { tex, refs }
     this.dirty = new Set();
-    this.uniforms = { uFowColor: { value: new THREE.Color('#171C38') }, uTime: { value: 0 } };
+    // Shared by every tile material. uTime drives animation; the sun and the
+    // reference height (ground under the player) drive the toon terrain tint.
+    this.uniforms = {
+      uFowColor: { value: new THREE.Color(FOG.cloud) },
+      // shadow colour as a ratio of the cloud colour, so it follows the time of day
+      uFowShadow: { value: new THREE.Vector3(...cloudShadowRatio()) },
+      uFowEdge: { value: new THREE.Color(FOG.edge) },
+      uTime: { value: 0 },
+      uSunDir: { value: new THREE.Vector3(0.35, 1, 0.3) },
+      uSunColor: { value: new THREE.Color('#FFF1D6') },
+      uRefHeight: { value: 0 },
+      uNight: { value: 0 }, // 0 day – 1 night: lit windows
+      uNoise: { value: noiseTexture() },
+    };
   }
 
   key(tx, ty) {
@@ -134,87 +184,224 @@ export class FogOfWar {
   }
 }
 
-// Adds fog of war (and for terrain: water shimmer and rocky slopes) to a tile material.
-// Works with MeshStandardMaterial and the cheaper MeshLambertMaterial.
-// `trunkColor`: for merged tree geometry, vertices with aTrunk = 1 use this colour
-// instead of the per-tree leaf colour.
-export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = false, waterMask = null, strength = 0.86, trunkColor = null }) {
-  const lambert = !!mat.isMeshLambertMaterial;
-  const u = {
-    uReveal: { value: reveal },
-    uTileOrigin: { value: new THREE.Vector2(origin.x, origin.z) },
-    uTileSize: { value: size },
-    uFowStrength: { value: strength },
-    uFowColor: fog.uniforms.uFowColor,
-    uTime: fog.uniforms.uTime,
-    uWaterMask: { value: waterMask },
-    uTrunkColor: { value: trunkColor || new THREE.Color() },
-  };
-  mat.onBeforeCompile = (sh) => {
-    Object.assign(sh.uniforms, u);
-    let vert = sh.vertexShader
-      .replace('#include <common>', `#include <common>\nvarying vec3 vFowPos;${trunkColor ? '\nattribute float aTrunk;\nuniform vec3 uTrunkColor;' : ''}`)
+// Toon lighting: the sun's light falls into three soft bands instead of a smooth
+// ramp. Patched into the light function of both the Lambert and the Standard
+// material, so it costs the same as before.
+const TOON_GLSL = `
+float twToon(float x) {
+  float t = smoothstep(0.0, 0.1, x) * 0.5 + smoothstep(0.3, 0.45, x) * 0.5;
+  return mix(x, t, 0.72);
+}`;
+const DOT_NL = 'float dotNL = saturate( dot( geometryNormal, directLight.direction ) );';
+function toonLights(frag, lambert) {
+  const chunk = lambert ? 'lights_lambert_pars_fragment' : 'lights_physical_pars_fragment';
+  const src = THREE.ShaderChunk[chunk];
+  if (!src?.includes(DOT_NL)) return frag; // a three.js update changed the chunk: plain lighting
+  return frag.replace(`#include <${chunk}>`, `${TOON_GLSL}\n${src.replace(DOT_NL, 'float dotNL = twToon( saturate( dot( geometryNormal, directLight.direction ) ) );')}`);
+}
+
+const ROCK_COLOR = new THREE.Color(LANDCOVER.rock.fill);
+const WATER_COLOR = new THREE.Color(WATER.fill);
+const WIN = BUILDING.windows;
+const WIN_DAY = new THREE.Color(WIN.day);
+const WIN_NIGHT = new THREE.Color(WIN.night);
+const glf = (v) => Number(v).toFixed(3);
+
+// Building walls: plinth band and window cells from the aWin attribute (see
+// extrude.js). Windows fade out when a cell is smaller than a couple of pixels,
+// so distant towns don't shimmer. At night about litShare of them glow.
+const WINDOWS_GLSL = `
+  if (vWin.y > -50.0) {
+    diffuseColor.rgb *= 1.0 - ${glf(BUILDING.plinth.darken)} * (1.0 - step(${glf(BUILDING.plinth.height)}, vWin.y));
+    float fl = floor(vWin.y / ${glf(WIN.floorHeight)});
+    float fy = vWin.y - fl * ${glf(WIN.floorHeight)};
+    float cx = floor(vWin.x / ${glf(WIN.spacing)});
+    float fx = vWin.x - cx * ${glf(WIN.spacing)};
+    vec2 aa = max(fwidth(vWin.xy), vec2(1e-3));
+    float hw = ${glf(WIN.width / 2)};
+    float mid = ${glf(WIN.spacing / 2)};
+    float inX = 1.0 - smoothstep(hw - aa.x, hw + aa.x, abs(fx - mid));
+    float inY = smoothstep(${glf(WIN.sill)} - aa.y, ${glf(WIN.sill)} + aa.y, fy) * (1.0 - smoothstep(${glf(WIN.sill + WIN.height)} - aa.y, ${glf(WIN.sill + WIN.height)} + aa.y, fy));
+    float fits = step(fl * ${glf(WIN.floorHeight)} + ${glf(WIN.sill + WIN.height + WIN.topGap)}, vWin.z);
+    float win = inX * inY * fits * (1.0 - smoothstep(0.35, 0.9, max(aa.x, aa.y)));
+    float lit = step(${glf(1 - WIN.litShare)}, fract(sin(dot(vec2(cx, fl), vec2(12.9898, 78.233))) * 43758.5453));
+    diffuseColor.rgb = mix(diffuseColor.rgb, mix(uWinDay, uWinNight * 0.6, uNight * lit), win);
+    totalEmissiveRadiance += uWinNight * win * lit * uNight * 1.3;
+  }`;
+
+/* ---------- GLSL pieces for patchTileMaterial ---------- */
+
+// value noise for the cloud veil, read from a tiling texture (8 lattice cells per repeat)
+const NOISE_GLSL = `
+uniform sampler2D uNoise;
+float twNoise(vec2 p) { return texture2D(uNoise, p * 0.125).r; }`;
+
+// Terrain: rocky steep slopes, warm valleys / cool heights relative to the
+// player's ground, warm rim light on slopes that face the sun, water shimmer.
+const terrainGlsl = (lambert) => `
+{
+  float wm = texture2D(uWaterMask, vMapUv).r;
+  float land = 1.0 - wm;
+  vec3 upV = normalize((viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
+  float steep = 1.0 - abs(dot(normal, upV));
+  diffuseColor.rgb = mix(diffuseColor.rgb, uRockColor, smoothstep(0.30, 0.55, steep) * land);
+  float hk = clamp((vFowPos.y - uRefHeight) / 220.0, -1.0, 1.0);
+  vec3 tint = hk < 0.0 ? vec3(1.07, 1.03, 0.84) : vec3(0.88, 1.0, 1.08);
+  diffuseColor.rgb *= mix(vec3(1.0), tint, abs(hk) * 0.75 * land);
+  vec3 nW = inverseTransformDirection(normal, viewMatrix);
+  float toSun = saturate(dot(nW, normalize(uSunDir)));
+  float rim = smoothstep(0.15, 0.6, steep) * toSun * toSun * (0.6 + 0.4 * pow(1.0 - saturate(dot(normal, normalize(vViewPosition))), 2.0));
+  totalEmissiveRadiance += uSunColor * diffuseColor.rgb * rim * land * 0.3;
+  float wave = sin(vFowPos.x * 0.35 + uTime * 1.7) * sin(vFowPos.z * 0.29 - uTime * 1.3);
+  diffuseColor.rgb = mix(diffuseColor.rgb, uWaterColor + wave * 0.04, wm * 0.85);
+  ${lambert ? '' : 'roughnessFactor = mix(roughnessFactor, 0.12, wm);'}
+  totalEmissiveRadiance += vec3(0.6, 0.9, 1.0) * smoothstep(0.8, 1.0, wave) * wm * ${lambert ? '0.55' : '0.4'};
+}`;
+
+// Trees: darker underside, lighter top of the crown (toon two-tone).
+const TREE_TONE_GLSL = `
+{
+  vec3 upT = normalize((viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
+  float crown = 1.0 - vTrunk;
+  diffuseColor.rgb *= mix(1.0, mix(0.74, 1.14, smoothstep(-0.35, 0.55, dot(normal, upT))), crown);
+}`;
+
+// Trees sway in the wind: vertices bend with the square of their height, each
+// tree with its own phase from its position. uSway = 0 turns it off.
+const SWAY_GLSL = `
+#ifdef USE_INSTANCING
+{
+  float hk = clamp((transformed.y - 1.5) / 8.0, 0.0, 1.0);
+  vec2 ph = instanceMatrix[3].xz;
+  float w = sin(uTime * 1.3 + ph.x * 0.05 + ph.y * 0.04) * 0.65 + sin(uTime * 2.3 + ph.x * 0.13 - ph.y * 0.07) * 0.35;
+  transformed.xz += vec2(w, w * 0.6) * uSway * hk * hk;
+}
+#endif`;
+
+// Cloud veil over unexplored land: two octaves of value noise drifting in world
+// space, between the cloud and its shadow colour, and a pulsing edge where fog is
+// being cleared. Applied before the distance haze, so far clouds still fade into
+// the horizon.
+const VEIL_GLSL = `
+{
+  vec2 fuv = clamp((vFowPos.xz - uTileOrigin) / uTileSize, 0.0, 1.0);
+  float rev = texture2D(uReveal, fuv).r;
+  if (rev < 0.99) { // explored ground skips the veil entirely
+  vec2 cp = vFowPos.xz * 0.0075 + vec2(uTime * 0.018, uTime * 0.011);
+  float n = twNoise(cp) * 0.65 + twNoise(cp * 2.3 + vec2(7.1, 3.7) - uTime * 0.013) * 0.35;
+  vec3 cloud = mix(uFowColor * uFowShadow, uFowColor, smoothstep(0.3, 0.75, n));
+  float veil = (1.0 - rev) * uFowStrength * (0.78 + 0.34 * n);
+  gl_FragColor.rgb = mix(gl_FragColor.rgb, linearToOutputTexel(vec4(cloud, 1.0)).rgb, clamp(veil, 0.0, 0.92));
+  float edge = smoothstep(0.15, 0.35, rev) * (1.0 - smoothstep(0.4, 0.65, rev));
+  float pulse = 0.75 + 0.25 * sin(uTime * 2.2 + (vFowPos.x + vFowPos.z) * 0.02);
+  gl_FragColor.rgb += linearToOutputTexel(vec4(uFowEdge, 1.0)).rgb * edge * pulse * 0.32;
+  }
+}`;
+
+const FRAG_UNIFORMS = `
+varying vec3 vFowPos;
+uniform sampler2D uReveal;
+uniform vec2 uTileOrigin;
+uniform float uTileSize;
+uniform float uFowStrength;
+uniform vec3 uFowColor;
+uniform vec3 uFowShadow;
+uniform vec3 uFowEdge;
+uniform float uTime;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform float uRefHeight;`;
+
+function patchVertex(src, { tree, windows }) {
+  let head = 'varying vec3 vFowPos;\nuniform float uTime;';
+  if (tree) head += '\nattribute float aTrunk;\nuniform vec3 uTrunkColor;\nuniform float uSway;\nvarying float vTrunk;';
+  if (windows) head += '\nattribute vec3 aWin;\nvarying vec3 vWin;';
+  let v = src.replace('#include <common>', `#include <common>\n${head}`).replace(
+    '#include <project_vertex>',
+    `#include <project_vertex>
+    vec4 fowWp = vec4(transformed, 1.0);
+    #ifdef USE_INSTANCING
+      fowWp = instanceMatrix * fowWp;
+    #endif
+    vFowPos = (modelMatrix * fowWp).xyz;`
+  );
+  if (windows) v = v.replace('#include <begin_vertex>', '#include <begin_vertex>\nvWin = aWin;');
+  if (tree) {
+    v = v
+      .replace('#include <begin_vertex>', `#include <begin_vertex>\nvTrunk = aTrunk;${SWAY_GLSL}`)
       .replace(
-        '#include <project_vertex>',
-        `#include <project_vertex>
-        vec4 fowWp = vec4(transformed, 1.0);
-        #ifdef USE_INSTANCING
-          fowWp = instanceMatrix * fowWp;
-        #endif
-        vFowPos = (modelMatrix * fowWp).xyz;`
-      );
-    if (trunkColor) {
-      vert = vert.replace(
         '#include <color_vertex>',
         `#include <color_vertex>
         #ifdef USE_INSTANCING_COLOR
           vColor.xyz = mix(vColor.xyz, uTrunkColor, aTrunk);
         #endif`
       );
-    }
-    sh.vertexShader = vert;
-    let frag = sh.fragmentShader.replace(
-      '#include <common>',
-      `#include <common>
-      varying vec3 vFowPos;
-      uniform sampler2D uReveal;
-      uniform vec2 uTileOrigin;
-      uniform float uTileSize;
-      uniform float uFowStrength;
-      uniform vec3 uFowColor;
-      uniform float uTime;
-      ${terrain ? 'uniform sampler2D uWaterMask;' : ''}`
-    );
-    if (terrain) {
-      frag = frag.replace(
-        '#include <emissivemap_fragment>',
-        `#include <emissivemap_fragment>
-        {
-          float wm = texture2D(uWaterMask, vMapUv).r;
-          vec3 upV = normalize((viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
-          float steep = 1.0 - abs(dot(normal, upV));
-          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.56, 0.54, 0.49), smoothstep(0.30, 0.55, steep) * (1.0 - wm));
-          float wave = sin(vFowPos.x * 0.35 + uTime * 1.7) * sin(vFowPos.z * 0.29 - uTime * 1.3);
-          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.23, 0.66, 0.85) + wave * 0.04, wm * 0.85);
-          ${lambert ? '' : 'roughnessFactor = mix(roughnessFactor, 0.12, wm);'}
-          totalEmissiveRadiance += vec3(0.6, 0.9, 1.0) * smoothstep(0.8, 1.0, wave) * wm * ${lambert ? '0.55' : '0.4'};
-        }`
-      );
-    }
-    frag = frag.replace(
-      '#include <dithering_fragment>',
-      `#include <dithering_fragment>
-      vec2 fuv = clamp((vFowPos.xz - uTileOrigin) / uTileSize, 0.0, 1.0);
-      float rev = texture2D(uReveal, fuv).r;
-      float swirl = sin(vFowPos.x * 0.012 + uTime * 0.35) * sin(vFowPos.z * 0.011 - uTime * 0.28) * 0.5 + 0.5;
-      float edge = smoothstep(0.12, 0.5, rev) * (1.0 - smoothstep(0.5, 0.95, rev));
-      vec3 fogCol = uFowColor + vec3(0.06, 0.07, 0.14) * swirl;
-      gl_FragColor.rgb = mix(gl_FragColor.rgb, fogCol, (1.0 - rev) * uFowStrength);
-      gl_FragColor.rgb += vec3(0.35, 0.8, 0.75) * edge * 0.14;`
-    );
-    sh.fragmentShader = frag;
+  }
+  return v;
+}
+
+function patchFragment(src, { lambert, terrain, tree, windows, toon }) {
+  let head = FRAG_UNIFORMS + NOISE_GLSL;
+  if (terrain) head += '\nuniform sampler2D uWaterMask;\nuniform vec3 uRockColor;\nuniform vec3 uWaterColor;';
+  if (tree) head += '\nvarying float vTrunk;';
+  if (windows) head += '\nvarying vec3 vWin;\nuniform float uNight;\nuniform vec3 uWinDay;\nuniform vec3 uWinNight;';
+  let f = src.replace('#include <common>', `#include <common>\n${head}`);
+  if (toon) f = toonLights(f, lambert);
+  let extra = '';
+  if (terrain) extra += terrainGlsl(lambert);
+  if (tree) extra += TREE_TONE_GLSL;
+  if (windows) extra += WINDOWS_GLSL;
+  if (extra) f = f.replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>\n${extra}`);
+  return f.replace('#include <fog_fragment>', `${VEIL_GLSL}\n#include <fog_fragment>`);
+}
+
+// Wind sway is off for people who ask for less motion.
+const REDUCED_MOTION = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+const SWAY = { value: REDUCED_MOTION ? 0 : 0.22 }; // metres at the top of a tree (before its scale)
+
+// Adds the cloud veil of the fog of war to a tile material, plus optionally:
+//   terrain   water shimmer, rocky slopes, height tint and rim light
+//   trunkColor  merged tree geometry: vertices with aTrunk = 1 use this colour; the
+//             crown gets two-tone shading and sways in the wind
+//   windows   building walls: plinth band and windows (needs the aWin attribute)
+//   toon      toon light bands
+// Works with MeshStandardMaterial and the cheaper MeshLambertMaterial.
+export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = false, waterMask = null, strength = FOG.veil, trunkColor = null, toon = true, windows = false }) {
+  const lambert = !!mat.isMeshLambertMaterial;
+  const tree = !!trunkColor;
+  const U = fog.uniforms;
+  const u = {
+    uReveal: { value: reveal },
+    uTileOrigin: { value: new THREE.Vector2(origin.x, origin.z) },
+    uTileSize: { value: size },
+    uFowStrength: { value: strength },
+    uFowColor: U.uFowColor,
+    uFowShadow: U.uFowShadow,
+    uFowEdge: U.uFowEdge,
+    uTime: U.uTime,
+    uSunDir: U.uSunDir,
+    uSunColor: U.uSunColor,
+    uRefHeight: U.uRefHeight,
+    uWaterMask: { value: waterMask },
+    uRockColor: { value: ROCK_COLOR },
+    uWaterColor: { value: WATER_COLOR },
+    uTrunkColor: { value: trunkColor || new THREE.Color() },
+    uSway: SWAY,
+    uNight: U.uNight,
+    uNoise: U.uNoise,
+    uWinDay: { value: WIN_DAY },
+    uWinNight: { value: WIN_NIGHT },
   };
-  const kind = terrain ? 'terrain' : trunkColor ? 'tree' : 'object';
-  mat.customProgramCacheKey = () => `tw-${kind}${lambert ? '-l' : ''}`;
+  const opts = { lambert, terrain, tree, windows, toon };
+  mat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, u);
+    sh.vertexShader = patchVertex(sh.vertexShader, opts);
+    sh.fragmentShader = patchFragment(sh.fragmentShader, opts);
+  };
+  let kind = 'object';
+  if (terrain) kind = 'terrain';
+  else if (tree) kind = 'tree';
+  else if (windows) kind = 'building';
+  mat.customProgramCacheKey = () => `tw-${kind}${lambert ? '-l' : ''}${toon ? '-t' : ''}`;
   return mat;
 }

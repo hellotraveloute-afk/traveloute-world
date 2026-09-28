@@ -11,7 +11,9 @@ export class VectorTile {
     b.push({ type: 3, properties: {}, geom: R(4090, 100, 40, 40) }); // centre in the next tile: skipped
     this.layers = {
       building: layer(b),
-      landcover: layer([{ type: 3, properties: { class: 'wood' }, geom: R(0, 0, 2048, 4096) }]),
+      landcover: layer([{ type: 3, properties: { class: 'wood' }, geom: R(0, 0, 2048, 4096) }, { type: 3, properties: { class: 'farmland' }, geom: R(2048, 3200, 900, 800) }]),
+      landuse: layer([{ type: 3, properties: { class: 'residential' }, geom: R(2048, 1200, 1500, 1800) }]),
+      park: layer([{ type: 3, properties: {}, geom: R(3600, 3600, 400, 400) }]),
       water: layer([{ type: 3, properties: {}, geom: R(3000, 100, 500, 500) }]),
       transportation: layer([{ type: 2, properties: { class: 'primary' }, geom: [[{ x: 0, y: 2048 }, { x: 4096, y: 2048 }]] }, { type: 2, properties: { class: 'rail' }, geom: [[{ x: 100, y: 0 }, { x: 100, y: 4096 }]] }]),
       poi: layer([
