@@ -14,7 +14,7 @@ Code: [`js/bridge.js`](../js/bridge.js) (transport) and the `initEmbed()` sectio
 - **World → app:** `window.TravelouteBridge.postMessage(JSON.stringify(msg))`. Outside the app, the message is only logged to the console.
 - **App → world:** `window.traveloute.receive(msg)`. `msg` can be an object or a JSON string.
 
-Every message is a JSON object with a `type`. Unknown types are ignored and logged. The protocol version is sent in `ready`. It is `1`.
+Every message is a JSON object with a `type`. Unknown types are ignored and logged. The protocol version is sent in `ready`. It is `1`. Version 1.2 of the world added the optional `maxFps` and `adaptive` fields to `start` and the `pixelRatio` and `tier` fields to `fps`; older apps can ignore them.
 
 The app must not send commands before `ready`. After a reload, the world starts from nothing, so the app must send `start` (and `setClaimed`, `setSound`) again after every `ready`.
 
@@ -31,7 +31,7 @@ The app must not send commands before `ready`. After a reload, the world starts 
 | `scanResult` | `{ found, place?, distanceM?, direction?, bearing? }` | After `scan`. `found: false` with a `place` means nothing hidden is near but that open place is |
 | `nearby` | `{ places: [Place + distanceM] }` | After `listNearby`, nearest first |
 | `explored` | `{ percent }` | Share of the current tile uncovered, every 3 s when it changes |
-| `fps` | `{ value, min, quality }` | Average frame rate over 5 s, and the worst 1 s inside it |
+| `fps` | `{ value, min, quality, pixelRatio, tier }` | Average frame rate over 5 s, and the worst 1 s inside it. `pixelRatio` is the current render resolution; `tier` is how many automatic quality steps have been taken (0 = none, see [PERFORMANCE.md](PERFORMANCE.md)) |
 | `error` | `{ message, fatal? }` | Tile or script failures. `fatal: true` means the world cannot run (for example no WebGL) |
 
 `Place`:
@@ -55,7 +55,7 @@ The app must not send commands before `ready`. After a reload, the world starts 
 
 | type | payload | purpose |
 |---|---|---|
-| `start` | `{ lat, lon, mode: "gps" \| "explore", quality?: "low" \| "high" }` | Build the world here. Ignored after the first time |
+| `start` | `{ lat, lon, mode: "gps" \| "explore", quality?: "low" \| "high", maxFps?: number, adaptive?: boolean }` | Build the world here. Ignored after the first time. `maxFps` caps the frame rate (15–240, default 60; send 30 to save battery). `adaptive: false` turns off automatic quality steps, for benchmarking |
 | `setPlayer` | `{ lat, lon, accuracyM }` | New GPS fix. Used in GPS mode. A fix sent before `start` finishes is kept and applied |
 | `setMode` | `{ mode }` | `gps` or `explore` |
 | `setTime` | `{ index }` or `{ preset: "Night" }` | Time of day: `Dawn`, `Day`, `Golden hour`, `Night` (index 0–3) |

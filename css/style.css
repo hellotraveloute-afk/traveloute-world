@@ -191,3 +191,9 @@ body.embed .hud-top, body.embed .dock, body.embed .context, body.embed .toasts, 
 body.embed .modal, body.embed .hint, body.embed .quests, body.embed .status, body.embed .start,
 body.embed .loader, body.embed .levelup, body.embed .fly { display: none !important; }
 body.embed .attrib { bottom: 2px; font-size: 9px; }
+
+/* Low graphics tier: blurring the moving 3D scene behind the HUD costs the GPU a full
+   extra pass per blurred element on budget phones, so use solid glass instead. */
+body.low-gfx { --glass: rgba(12, 22, 38, .9); }
+body.low-gfx .profile, body.low-gfx .stars, body.low-gfx .iconbtn, body.low-gfx .quests,
+body.low-gfx .modal { backdrop-filter: none; -webkit-backdrop-filter: none; }

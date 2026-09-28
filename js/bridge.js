@@ -9,7 +9,7 @@
 // Every message is a JSON object with a `type` field. See docs/BRIDGE.md.
 
 export const PROTOCOL = 1;
-export const VERSION = '1.1';
+export const VERSION = '1.2';
 export const EMBED = new URLSearchParams(location.search).get('embed') === '1';
 
 const handlers = new Map();

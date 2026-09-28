@@ -11,7 +11,7 @@ export class FogOfWar {
   constructor(proj) {
     this.proj = proj;
     this.grids = new Map();
-    this.textures = new Map();
+    this.textures = new Map(); // key -> { tex, refs }
     this.dirty = new Set();
     this.uniforms = { uFowColor: { value: new THREE.Color('#171C38') }, uTime: { value: 0 } };
   }
@@ -24,33 +24,37 @@ export class FogOfWar {
     const k = this.key(tx, ty);
     let g = this.grids.get(k);
     if (!g) {
-      g = loadBytes(k);
+      g = loadBytes(k, FOG_RES * FOG_RES);
       if (!g || g.length !== FOG_RES * FOG_RES) g = new Uint8Array(FOG_RES * FOG_RES);
       this.grids.set(k, g);
     }
     return g;
   }
 
+  // The fog texture of a tile. Reference-counted: a tile can be unloaded and
+  // loaded again while its old build is still finishing, and both share it.
   texture(tx, ty) {
     const k = this.key(tx, ty);
-    let t = this.textures.get(k);
-    if (!t) {
-      t = new THREE.DataTexture(this.grid(tx, ty), FOG_RES, FOG_RES, THREE.RedFormat, THREE.UnsignedByteType);
-      t.magFilter = THREE.LinearFilter;
-      t.minFilter = THREE.LinearFilter;
-      t.needsUpdate = true;
-      this.textures.set(k, t);
+    let e = this.textures.get(k);
+    if (!e) {
+      const tex = new THREE.DataTexture(this.grid(tx, ty), FOG_RES, FOG_RES, THREE.RedFormat, THREE.UnsignedByteType);
+      tex.magFilter = THREE.LinearFilter;
+      tex.minFilter = THREE.LinearFilter;
+      tex.needsUpdate = true;
+      e = { tex, refs: 0 };
+      this.textures.set(k, e);
     }
-    return t;
+    e.refs++;
+    return e.tex;
   }
 
   releaseTexture(tx, ty) {
     const k = this.key(tx, ty);
-    const t = this.textures.get(k);
-    if (t) {
-      t.dispose();
-      this.textures.delete(k);
-    }
+    const e = this.textures.get(k);
+    if (!e) return;
+    if (--e.refs > 0) return;
+    e.tex.dispose();
+    this.textures.delete(k);
   }
 
   // Clears fog in a soft circle. Returns true if anything changed.
@@ -87,8 +91,8 @@ export class FogOfWar {
           changed = true;
           const k = this.key(tx, ty);
           this.dirty.add(k);
-          const t = this.textures.get(k);
-          if (t) t.needsUpdate = true;
+          const e = this.textures.get(k);
+          if (e) e.tex.needsUpdate = true;
         }
       }
     }
@@ -96,13 +100,20 @@ export class FogOfWar {
   }
 
   at(x, z) {
+    const c = this.cell(x, z);
+    return c.grid[c.idx] / 255;
+  }
+
+  // The grid and cell index under (x, z). Grids live for the whole session, so
+  // callers can keep the result and read `grid[idx]` without any lookups.
+  cell(x, z) {
     const { tx, ty } = this.proj.tileAt(x, z);
-    const g = this.grid(tx, ty);
+    const grid = this.grid(tx, ty);
     const o = this.proj.tileOrigin(tx, ty);
-    const cell = this.proj.tileMeters / FOG_RES;
-    const i = Math.min(FOG_RES - 1, Math.max(0, Math.floor((x - o.x) / cell)));
-    const j = Math.min(FOG_RES - 1, Math.max(0, Math.floor((z - o.z) / cell)));
-    return g[j * FOG_RES + i] / 255;
+    const size = this.proj.tileMeters / FOG_RES;
+    const i = Math.min(FOG_RES - 1, Math.max(0, Math.floor((x - o.x) / size)));
+    const j = Math.min(FOG_RES - 1, Math.max(0, Math.floor((z - o.z) / size)));
+    return { grid, idx: j * FOG_RES + i };
   }
 
   // Share of the tile under (x, z) that has been explored, 0–100.
@@ -123,8 +134,12 @@ export class FogOfWar {
   }
 }
 
-// Adds fog of war (and for terrain: water shimmer and rocky slopes) to a standard material.
-export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = false, waterMask = null, strength = 0.86 }) {
+// Adds fog of war (and for terrain: water shimmer and rocky slopes) to a tile material.
+// Works with MeshStandardMaterial and the cheaper MeshLambertMaterial.
+// `trunkColor`: for merged tree geometry, vertices with aTrunk = 1 use this colour
+// instead of the per-tree leaf colour.
+export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = false, waterMask = null, strength = 0.86, trunkColor = null }) {
+  const lambert = !!mat.isMeshLambertMaterial;
   const u = {
     uReveal: { value: reveal },
     uTileOrigin: { value: new THREE.Vector2(origin.x, origin.z) },
@@ -133,11 +148,12 @@ export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = fa
     uFowColor: fog.uniforms.uFowColor,
     uTime: fog.uniforms.uTime,
     uWaterMask: { value: waterMask },
+    uTrunkColor: { value: trunkColor || new THREE.Color() },
   };
   mat.onBeforeCompile = (sh) => {
     Object.assign(sh.uniforms, u);
-    sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vFowPos;')
+    let vert = sh.vertexShader
+      .replace('#include <common>', `#include <common>\nvarying vec3 vFowPos;${trunkColor ? '\nattribute float aTrunk;\nuniform vec3 uTrunkColor;' : ''}`)
       .replace(
         '#include <project_vertex>',
         `#include <project_vertex>
@@ -147,6 +163,16 @@ export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = fa
         #endif
         vFowPos = (modelMatrix * fowWp).xyz;`
       );
+    if (trunkColor) {
+      vert = vert.replace(
+        '#include <color_vertex>',
+        `#include <color_vertex>
+        #ifdef USE_INSTANCING_COLOR
+          vColor.xyz = mix(vColor.xyz, uTrunkColor, aTrunk);
+        #endif`
+      );
+    }
+    sh.vertexShader = vert;
     let frag = sh.fragmentShader.replace(
       '#include <common>',
       `#include <common>
@@ -170,8 +196,8 @@ export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = fa
           diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.56, 0.54, 0.49), smoothstep(0.30, 0.55, steep) * (1.0 - wm));
           float wave = sin(vFowPos.x * 0.35 + uTime * 1.7) * sin(vFowPos.z * 0.29 - uTime * 1.3);
           diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.23, 0.66, 0.85) + wave * 0.04, wm * 0.85);
-          roughnessFactor = mix(roughnessFactor, 0.12, wm);
-          totalEmissiveRadiance += vec3(0.6, 0.9, 1.0) * smoothstep(0.8, 1.0, wave) * wm * 0.4;
+          ${lambert ? '' : 'roughnessFactor = mix(roughnessFactor, 0.12, wm);'}
+          totalEmissiveRadiance += vec3(0.6, 0.9, 1.0) * smoothstep(0.8, 1.0, wave) * wm * ${lambert ? '0.55' : '0.4'};
         }`
       );
     }
@@ -188,6 +214,7 @@ export function patchTileMaterial(mat, fog, { reveal, origin, size, terrain = fa
     );
     sh.fragmentShader = frag;
   };
-  mat.customProgramCacheKey = () => (terrain ? 'tw-terrain' : 'tw-object');
+  const kind = terrain ? 'terrain' : trunkColor ? 'tree' : 'object';
+  mat.customProgramCacheKey = () => `tw-${kind}${lambert ? '-l' : ''}`;
   return mat;
 }

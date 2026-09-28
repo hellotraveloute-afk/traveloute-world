@@ -1,12 +1,20 @@
 // Loads map tiles around the player and turns them into game world using rules.js.
 //
 // For each tile:
-//   1. download vector map data (OpenStreetMap) and elevation (AWS Terrain Tiles)
+//   1. download vector map data (OpenStreetMap) and elevation (AWS Terrain Tiles),
+//      several tiles at once, cached on the device
 //   2. build a low-poly terrain mesh from the heights
 //   3. paint the ground texture from land use, water, roads and railways
 //   4. scatter trees by density rules
 //   5. extrude buildings from their footprints
 //   6. collect places that become crystals
+//
+// Building runs on the main thread, one tile at a time, in small steps with a
+// frame in between, so walking stays smooth while new tiles appear.
+//
+// Trees and buildings are split into CONFIG.chunksPerTile x chunksPerTile chunks.
+// Each chunk is its own mesh, so the camera, the shadow pass and the distance
+// check (cull) can skip the parts of a tile that can't be seen.
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
@@ -15,6 +23,8 @@ import * as VectorTileModule from '@mapbox/vector-tile';
 import { CONFIG } from './config.js';
 import { tileKey } from './geo.js';
 import { patchTileMaterial } from './fog.js';
+import { BuildingBuffer } from './extrude.js';
+import { cachedFetch, freshFetch } from './net.js';
 import { clamp, hashStr, mulberry32, nextFrame } from './util.js';
 import {
   GROUND, LANDCOVER, LANDUSE, PARK, WATER, WATERWAY, ROADS, RAIL, BUILDING, TREES,
@@ -26,6 +36,7 @@ const Pbf = PbfModule.default || PbfModule.Pbf || PbfModule;
 const VectorTile = VectorTileModule.VectorTile || (VectorTileModule.default && VectorTileModule.default.VectorTile);
 
 const RARITY_ORDER = { Common: 0, Rare: 1, Epic: 2, Legendary: 3 };
+const TRUNK_COLOR = new THREE.Color('#6A4A33');
 
 function makeCanvas(size, readable = false) {
   const c = document.createElement('canvas');
@@ -58,27 +69,56 @@ function toPolygons(rings) {
 }
 
 // Replaces single bad height samples (spikes or pits) with the median of their neighbours.
-function despike(h) {
+// Sorts the (at most 8) neighbours in place, so no arrays are created per pixel.
+export function despike(h) {
   const out = new Float32Array(h);
   const nb = new Float32Array(8);
   for (let y = 0; y < 256; y++) {
+    const y0 = y > 0 ? y - 1 : 0;
+    const y1 = y < 255 ? y + 1 : 255;
     for (let x = 0; x < 256; x++) {
+      const x0 = x > 0 ? x - 1 : 0;
+      const x1 = x < 255 ? x + 1 : 255;
       let n = 0;
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          if (!dx && !dy) continue;
-          const xx = x + dx;
-          const yy = y + dy;
-          if (xx < 0 || yy < 0 || xx > 255 || yy > 255) continue;
-          nb[n++] = h[yy * 256 + xx];
+      for (let yy = y0; yy <= y1; yy++) {
+        const row = yy * 256;
+        for (let xx = x0; xx <= x1; xx++) {
+          if (xx === x && yy === y) continue;
+          // insertion sort as we go
+          const v = h[row + xx];
+          let k = n++;
+          while (k > 0 && nb[k - 1] > v) {
+            nb[k] = nb[k - 1];
+            k--;
+          }
+          nb[k] = v;
         }
       }
-      const arr = Array.from(nb.subarray(0, n)).sort((a, b) => a - b);
-      const med = arr[n >> 1];
-      if (Math.abs(h[y * 256 + x] - med) > 40) out[y * 256 + x] = med;
+      const med = nb[n >> 1];
+      const i = y * 256 + x;
+      if (Math.abs(h[i] - med) > 40) out[i] = med;
     }
   }
   return out;
+}
+
+// Tree shape with its trunk merged in, so one instanced draw covers both.
+// `aTrunk` marks trunk vertices; the tile material colours them brown.
+function treeGeometry(crown) {
+  const trunk = new THREE.CylinderGeometry(0.35, 0.5, 2.6, 5, 1, true).translate(0, 1.3, 0).toNonIndexed();
+  const top = crown.index ? crown.toNonIndexed() : crown;
+  const parts = [top, trunk];
+  parts.forEach((g, i) => {
+    g.deleteAttribute('uv');
+    g.setAttribute('aTrunk', new THREE.Float32BufferAttribute(new Float32Array(g.attributes.position.count).fill(i), 1));
+  });
+  const merged = mergeGeometries(parts, false);
+  merged.computeBoundingSphere();
+  return merged;
+}
+
+function triangulate(pts) {
+  return THREE.ShapeUtils.triangulateShape(pts.map((p) => new THREE.Vector2(p.x, p.z)), []);
 }
 
 class Tile {
@@ -86,36 +126,47 @@ class Tile {
     this.tx = tx;
     this.ty = ty;
     this.z = z;
+    this.num = tx * 65536 + ty;
     this.key = tileKey(z, tx, ty);
-    this.state = 'queued';
+    this.state = 'queued'; // queued -> loading (building) -> ready | error
     this.cancelled = false;
     this.group = new THREE.Group();
     this.places = [];
     this.heights = null;
     this.disposables = [];
+    this.cullables = []; // { obj, x, z, r, kind: 'tree' | 'building' }
+    this.download = null;
+    this.abort = null;
+    this.fogHeld = false;
   }
 }
 
 export class TileManager {
-  constructor({ scene, proj, quality, fog, onPlacesAdded, onPlacesRemoved, onStatus, onError }) {
-    Object.assign(this, { scene, proj, quality, fog, onPlacesAdded, onPlacesRemoved, onStatus, onError });
+  constructor({ scene, renderer, proj, quality, fog, onPlacesAdded, onPlacesRemoved, onStatus, onError }) {
+    Object.assign(this, { scene, renderer, proj, quality, fog, onPlacesAdded, onPlacesRemoved, onStatus, onError });
     this.tiles = new Map();
+    this.byNum = new Map(); // same tiles, keyed by a number for fast height lookups
     this.queue = [];
-    this.loading = 0;
+    this.downloading = 0;
+    this.building = 0;
     this.vectorUrl = null;
     this.lastHeight = 0;
     this.errors = 0;
+    this.lastStatus = '';
 
     // shared tree geometry (metres)
-    this.pineGeo = new THREE.ConeGeometry(2.3, 7.5, 6).translate(0, 6, 0);
-    this.roundGeo = new THREE.IcosahedronGeometry(3.1, 0).translate(0, 5.2, 0);
-    this.trunkGeo = new THREE.CylinderGeometry(0.35, 0.5, 2.6, 5).translate(0, 1.3, 0);
+    this.pineGeo = treeGeometry(new THREE.ConeGeometry(2.3, 7.5, 6).translate(0, 6, 0));
+    this.roundGeo = treeGeometry(new THREE.IcosahedronGeometry(3.1, 0).translate(0, 5.2, 0));
     this.terracePatterns = new Map();
+  }
+
+  get busy() {
+    return this.building > 0;
   }
 
   async init() {
     try {
-      const res = await fetch(CONFIG.tileJsonUrl);
+      const res = await freshFetch(CONFIG.tileJsonUrl);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       this.vectorUrl = json.tiles && json.tiles[0];
@@ -131,36 +182,40 @@ export class TileManager {
     return !!this.vectorUrl;
   }
 
-  // Call every frame with the player position.
+  // Call regularly with the player position.
   update(x, z) {
     const { tx, ty } = this.proj.tileAt(x, z);
     const R = CONFIG.loadRadius;
-    const want = [];
     for (let dy = -R; dy <= R; dy++) {
       for (let dx = -R; dx <= R; dx++) {
         const k = tileKey(this.proj.z, tx + dx, ty + dy);
-        if (!this.tiles.has(k)) want.push({ tx: tx + dx, ty: ty + dy, d: Math.abs(dx) + Math.abs(dy) });
+        if (this.tiles.has(k)) continue;
+        const t = new Tile(tx + dx, ty + dy, this.proj.z);
+        this.tiles.set(t.key, t);
+        this.byNum.set(t.num, t);
+        this.queue.push(t);
       }
-    }
-    want.sort((a, b) => a.d - b.d);
-    for (const w of want) {
-      const t = new Tile(w.tx, w.ty, this.proj.z);
-      this.tiles.set(t.key, t);
-      this.queue.push(t);
     }
     for (const t of [...this.tiles.values()]) {
       if (Math.max(Math.abs(t.tx - tx), Math.abs(t.ty - ty)) > CONFIG.keepRadius) this.unload(t);
     }
-    // keep the queue ordered by distance to the player
-    this.queue.sort((a, b) => Math.abs(a.tx - tx) + Math.abs(a.ty - ty) - (Math.abs(b.tx - tx) + Math.abs(b.ty - ty)));
+    // keep the queue ordered by distance to the player, dropping unloaded tiles
+    const dist = (t) => Math.abs(t.tx - tx) + Math.abs(t.ty - ty);
+    this.queue = this.queue.filter((t) => !t.cancelled).sort((a, b) => dist(a) - dist(b));
     this.pump();
   }
 
   pump() {
-    while (this.loading < CONFIG.maxParallelLoads && this.queue.length) {
+    // downloads: nearest tiles first, several at once
+    for (const t of this.queue) {
+      if (this.downloading >= CONFIG.maxParallelDownloads) break;
+      if (!t.cancelled && !t.download) this.startDownload(t);
+    }
+    // builds: one at a time (it's main-thread work)
+    while (this.building < CONFIG.maxParallelBuilds && this.queue.length) {
       const t = this.queue.shift();
       if (t.cancelled || t.state !== 'queued') continue;
-      this.loading++;
+      this.building++;
       this.build(t)
         .catch((e) => {
           console.error('Tile failed', t.key, e);
@@ -169,12 +224,24 @@ export class TileManager {
           this.onError && this.onError(`Tile ${t.key} failed: ${e && e.message ? e.message : e}`);
         })
         .finally(() => {
-          this.loading--;
+          this.building--;
           this.reportStatus();
           this.pump();
         });
     }
     this.reportStatus();
+  }
+
+  startDownload(t) {
+    this.downloading++;
+    t.abort = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const signal = t.abort ? t.abort.signal : undefined;
+    t.download = Promise.all([this.loadElevation(t.tx, t.ty, t.z, signal), this.loadVector(t.tx, t.ty, t.z, signal)])
+      .then(([elev, vt]) => ({ elev, vt }))
+      .finally(() => {
+        this.downloading--;
+        this.pump();
+      });
   }
 
   reportStatus() {
@@ -184,42 +251,121 @@ export class TileManager {
       total++;
       if (t.state === 'ready' || t.state === 'error') ready++;
     }
+    const key = `${ready}/${total}`;
+    if (key === this.lastStatus) return;
+    this.lastStatus = key;
     this.onStatus && this.onStatus(ready, total);
   }
 
   isReadyAt(x, z) {
     const { tx, ty } = this.proj.tileAt(x, z);
-    const t = this.tiles.get(tileKey(this.proj.z, tx, ty));
+    const t = this.byNum.get(tx * 65536 + ty);
     return !!(t && (t.state === 'ready' || t.state === 'error') && t.heights);
   }
 
   unload(t) {
     t.cancelled = true;
+    if (t.abort) t.abort.abort(); // stops downloads still in flight; harmless if they finished
     this.tiles.delete(t.key);
+    if (this.byNum.get(t.num) === t) this.byNum.delete(t.num);
     if (t.state === 'ready') {
       this.scene.remove(t.group);
-      for (const d of t.disposables) d.dispose();
-      this.fog.releaseTexture(t.tx, t.ty);
+      this.freeTile(t);
       this.onPlacesRemoved && this.onPlacesRemoved(t.key);
     }
+    // a tile still being built frees itself at its next step (discard)
   }
 
   // Frees a tile that was unloaded while it was still being built.
   discard(t) {
+    this.freeTile(t);
+  }
+
+  freeTile(t) {
     for (const d of t.disposables) d.dispose();
     t.disposables.length = 0;
-    this.fog.releaseTexture(t.tx, t.ty);
+    t.cullables.length = 0;
+    if (t.fogHeld) {
+      this.fog.releaseTexture(t.tx, t.ty);
+      t.fogHeld = false;
+    }
+  }
+
+  // Throws everything away and loads it again (after the GPU context was lost).
+  rebuildAll(x, z) {
+    for (const t of [...this.tiles.values()]) this.unload(t);
+    this.queue.length = 0;
+    this.update(x, z);
+  }
+
+  // Shows only the chunks near enough to matter. `treeDist` for trees,
+  // `farDist` for buildings and whole tiles (beyond it everything is fully fogged).
+  cull(camX, camZ, treeDist, farDist) {
+    const tm = this.proj.tileMeters;
+    for (const t of this.tiles.values()) {
+      if (t.state !== 'ready') continue;
+      const ox = t.origin.x;
+      const oz = t.origin.z;
+      const dx = Math.max(ox - camX, 0, camX - (ox + tm));
+      const dz = Math.max(oz - camZ, 0, camZ - (oz + tm));
+      const visible = Math.hypot(dx, dz) <= farDist;
+      t.group.visible = visible;
+      if (!visible) continue;
+      for (const c of t.cullables) {
+        const d = Math.hypot(c.x - camX, c.z - camZ) - c.r;
+        c.obj.visible = d <= (c.kind === 'tree' ? treeDist : farDist);
+      }
+    }
   }
 
   // Terrain height at a world position (metres).
   heightAt(x, z) {
-    const { tx, ty } = this.proj.tileAt(x, z);
-    const t = this.tiles.get(tileKey(this.proj.z, tx, ty));
-    if (!t || !t.heights) return this.lastHeight;
-    const tm = this.proj.tileMeters;
-    const h = this.sampleGrid(t, (x - t.origin.x) / tm, (z - t.origin.z) / tm);
+    const h = this.heightAtOrNull(x, z);
+    if (h === null) return this.lastHeight;
     this.lastHeight = h;
     return h;
+  }
+
+  heightAtOrNull(x, z) {
+    const tm = this.proj.tileMeters;
+    const fx = this.proj.X0 + x / tm;
+    const fy = this.proj.Y0 + z / tm;
+    const tx = Math.floor(fx);
+    const ty = Math.floor(fy);
+    const t = this.byNum.get(tx * 65536 + ty);
+    if (!t || !t.heights) return null;
+    return this.sampleGrid(t, fx - tx, fy - ty);
+  }
+
+  // Where a ray first meets the ground, found by stepping along the ray over the
+  // height grid. Much cheaper than testing every terrain triangle.
+  raycastGround(ray, maxDist = 4000) {
+    const o = ray.origin;
+    const d = ray.direction;
+    const at = (s) => this.heightAtOrNull(o.x + d.x * s, o.z + d.z * s);
+    let h = at(0);
+    if (h === null) return null;
+    if (o.y <= h) return new THREE.Vector3(o.x, h, o.z);
+    let prev = 0;
+    let s = 0;
+    while (s < maxDist) {
+      s += Math.min(20, 3 + s * 0.01);
+      h = at(s);
+      if (h === null) return null; // ran off the loaded map
+      if (o.y + d.y * s <= h) {
+        let lo = prev;
+        let hi = s;
+        for (let i = 0; i < 16; i++) {
+          const mid = (lo + hi) / 2;
+          const hm = at(mid);
+          if (hm !== null && o.y + d.y * mid <= hm) hi = mid;
+          else lo = mid;
+        }
+        return new THREE.Vector3(o.x + d.x * hi, o.y + d.y * hi, o.z + d.z * hi);
+      }
+      prev = s;
+    }
+    return null;
   }
 
   sampleGrid(t, u, v) {
@@ -241,17 +387,18 @@ export class TileManager {
 
   /* ---------------------------------------------------------------- loading */
 
-  async loadElevation(tx, ty, z) {
+  async loadElevation(tx, ty, z, signal) {
     const url = CONFIG.terrainUrl.replace('{z}', z).replace('{x}', tx).replace('{y}', ty);
     try {
       // Heights are stored in the pixel colours, so the browser must not colour-correct them:
       // even a 1-step change in the red channel means a 256 m spike.
       let source;
       try {
-        const res = await fetch(url, { mode: 'cors' });
+        const res = await cachedFetch(url, { signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         source = await createImageBitmap(await res.blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
-      } catch {
+      } catch (e) {
+        if (signal && signal.aborted) return null;
         const img = new Image();
         img.crossOrigin = 'anonymous';
         img.src = url;
@@ -267,32 +414,55 @@ export class TileManager {
       for (let i = 0; i < raw.length; i++) raw[i] = d[i * 4] * 256 + d[i * 4 + 1] + d[i * 4 + 2] / 256 - 32768;
       return despike(raw);
     } catch (e) {
-      console.warn('Elevation tile failed', tx, ty, e);
+      if (!(signal && signal.aborted)) console.warn('Elevation tile failed', tx, ty, e);
       return null;
     }
   }
 
-  async loadVector(tx, ty, z) {
+  async loadVector(tx, ty, z, signal) {
     if (!this.vectorUrl) return null;
     const url = this.vectorUrl.replace('{z}', z).replace('{x}', tx).replace('{y}', ty);
     try {
-      const res = await fetch(url);
+      const res = await cachedFetch(url, { signal });
       if (res.status === 204 || res.status === 404) return null; // empty sea tile
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const buf = await res.arrayBuffer();
+      if (!buf.byteLength) return null;
       return new VectorTile(new Pbf(new Uint8Array(buf)));
     } catch (e) {
-      console.warn('Vector tile failed', tx, ty, e);
+      if (!(signal && signal.aborted)) console.warn('Vector tile failed', tx, ty, e);
       return null;
     }
   }
 
   /* ---------------------------------------------------------------- building */
 
+  material(params) {
+    const q = this.quality;
+    if (q.lambert) {
+      const { roughness, ...rest } = params;
+      return new THREE.MeshLambertMaterial(rest);
+    }
+    return new THREE.MeshStandardMaterial(params);
+  }
+
+  // Uploads a canvas texture to the GPU now (instead of during a later frame)
+  // and then frees the canvas: the GPU copy is all that's needed.
+  // If the GPU context is lost, main.js rebuilds the tiles.
+  upload(tex) {
+    try {
+      this.renderer.initTexture(tex);
+      const c = tex.image;
+      if (c && c.width) c.width = c.height = 1;
+    } catch {
+      /* leave it to the first render */
+    }
+  }
+
   async build(t) {
     t.state = 'loading';
-    const z = this.proj.z;
-    const [elev, vt] = await Promise.all([this.loadElevation(t.tx, t.ty, z), this.loadVector(t.tx, t.ty, z)]);
+    if (!t.download) this.startDownload(t);
+    const { elev, vt } = await t.download;
     if (t.cancelled) return this.discard(t);
 
     const q = this.quality;
@@ -324,24 +494,26 @@ export class TileManager {
     }
     t.heights = hg;
     t.seg = seg;
-    await nextFrame();
-    if (t.cancelled) return this.discard(t);
 
-    // 2. paint the ground
-    const paint = this.paint(vt, q.texSize, tm, rand);
+    // 2. paint the ground (spread over a few frames)
+    const paint = await this.paint(t, vt, q.texSize, tm, rand);
+    if (t.cancelled) return this.discard(t);
     const tex = new THREE.CanvasTexture(paint.color);
     tex.colorSpace = THREE.SRGBColorSpace;
-    tex.anisotropy = 4;
+    tex.anisotropy = Math.min(q.anisotropy, this.renderer.capabilities.getMaxAnisotropy());
     const waterTex = new THREE.CanvasTexture(paint.water);
     t.disposables.push(tex, waterTex);
+    this.upload(tex);
+    this.upload(waterTex);
     await nextFrame();
     if (t.cancelled) return this.discard(t);
 
     // 3. terrain mesh
     const reveal = this.fog.texture(t.tx, t.ty);
+    t.fogHeld = true;
     const fogOpts = { reveal, origin: t.origin, size: tm };
     const terrainMat = patchTileMaterial(
-      new THREE.MeshStandardMaterial({ map: tex, flatShading: true, roughness: 0.95, side: THREE.DoubleSide }),
+      this.material({ map: tex, flatShading: true, roughness: 0.95 }),
       this.fog,
       { ...fogOpts, terrain: true, waterMask: waterTex }
     );
@@ -354,7 +526,9 @@ export class TileManager {
       const j = Math.round((pos.getZ(k) / tm) * seg);
       pos.setY(k, hg[j * N + i]);
     }
-    geo.computeVertexNormals();
+    // normals are only needed for the shadow offset; flat shading works them out per pixel
+    if (q.shadows) geo.computeVertexNormals();
+    geo.computeBoundingSphere();
     const terrain = new THREE.Mesh(geo, terrainMat);
     terrain.receiveShadow = q.shadows;
     terrain.userData.isTerrain = true;
@@ -363,6 +537,8 @@ export class TileManager {
     t.group.add(skirt);
     t.terrain = terrain;
     t.disposables.push(geo, skirt.geometry, terrainMat);
+    await nextFrame();
+    if (t.cancelled) return this.discard(t);
 
     // 4. trees
     this.buildTrees(t, paint.density, rand, fogOpts);
@@ -376,12 +552,18 @@ export class TileManager {
     // 6. places
     if (vt) t.places = this.collectPlaces(t, vt);
 
+    // nothing in a tile moves, so its matrices are computed once
+    t.group.traverse((o) => {
+      o.updateMatrix();
+      o.matrixAutoUpdate = false;
+    });
     this.scene.add(t.group);
     t.state = 'ready';
     this.onPlacesAdded && this.onPlacesAdded(t.key, t.places);
   }
 
   // A strip hanging down from the tile edges hides cracks between neighbouring tiles.
+  // Its faces point outwards, so the terrain material doesn't need to be double-sided.
   skirtGeometry(hg, seg, tm) {
     const N = seg + 1;
     const drop = 40;
@@ -414,7 +596,7 @@ export class TileManager {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-    g.computeVertexNormals();
+    if (this.quality.shadows) g.computeVertexNormals();
     return g;
   }
 
@@ -432,7 +614,8 @@ export class TileManager {
   }
 
   // Paints the ground texture, a water mask (for shimmer) and a tree density map.
-  paint(vt, size, tm, rand) {
+  // Yields a frame between layer groups; returns null if the tile was unloaded meanwhile.
+  async paint(t, vt, size, tm, rand) {
     const { canvas: color, ctx: c } = makeCanvas(size);
     const { canvas: water, ctx: w } = makeCanvas(256);
     const { canvas: dens, ctx: d } = makeCanvas(128, true);
@@ -442,11 +625,18 @@ export class TileManager {
 
     c.fillStyle = GROUND.base;
     c.fillRect(0, 0, size, size);
+    // speckles, collected into two paths so there are 2 fills instead of thousands
+    const speckA = new Path2D();
+    const speckB = new Path2D();
     for (let i = 0; i < size * 3; i++) {
-      c.fillStyle = rand() < 0.5 ? GROUND.speckleA : GROUND.speckleB;
+      const target = rand() < 0.5 ? speckA : speckB;
       const r = 1 + (rand() * size) / 170;
-      c.fillRect(rand() * size, rand() * size, r, r);
+      target.rect(rand() * size, rand() * size, r, r);
     }
+    c.fillStyle = GROUND.speckleA;
+    c.fill(speckA);
+    c.fillStyle = GROUND.speckleB;
+    c.fill(speckB);
     w.fillStyle = '#000';
     w.fillRect(0, 0, 256, 256);
     const g0 = TREES.unmappedDensity;
@@ -458,6 +648,10 @@ export class TileManager {
       result.density = d.getImageData(0, 0, 128, 128).data;
       return result;
     }
+    const step = async () => {
+      await nextFrame();
+      return !t.cancelled;
+    };
 
     const layers = vt.layers;
     const each = (name, type, fn) => {
@@ -507,6 +701,7 @@ export class TileManager {
       c.lineWidth = Math.max(1, size / 512);
       c.stroke();
     });
+    if (!(await step())) return null;
 
     // water
     each('water', 3, (f, g, ext) => {
@@ -540,6 +735,7 @@ export class TileManager {
       d.lineWidth = ((wid + 6) * 128) / tm + 0.5;
       d.stroke();
     });
+    if (!(await step())) return null;
 
     // roads and railways
     const roads = [];
@@ -579,6 +775,7 @@ export class TileManager {
       d.lineWidth = ((rule.w + 5) * 128) / tm + 0.5;
       d.stroke();
     }
+    if (!(await step())) return null;
 
     // building footprints (the 3D buildings stand on these)
     each('building', 3, (f, g, ext) => {
@@ -594,30 +791,34 @@ export class TileManager {
     return result;
   }
 
+  // Registers a chunk mesh for distance culling. (ci, cj) is the chunk cell.
+  addChunk(t, obj, ci, cj, kind) {
+    const cs = this.proj.tileMeters / CONFIG.chunksPerTile;
+    t.group.add(obj);
+    t.cullables.push({ obj, kind, x: t.origin.x + (ci + 0.5) * cs, z: t.origin.z + (cj + 0.5) * cs, r: cs * 0.7072 + 10 });
+  }
+
   buildTrees(t, density, rand, fogOpts) {
     const q = this.quality;
     const tm = this.proj.tileMeters;
+    const C = CONFIG.chunksPerTile;
     const max = q.trees;
-    const pines = new THREE.InstancedMesh(this.pineGeo, null, max);
-    const rounds = new THREE.InstancedMesh(this.roundGeo, null, max);
-    const trunks = new THREE.InstancedMesh(this.trunkGeo, null, max * 2);
-    const leafMat1 = patchTileMaterial(new THREE.MeshStandardMaterial({ color: '#ffffff', flatShading: true, roughness: 0.85 }), this.fog, fogOpts);
-    const leafMat2 = patchTileMaterial(new THREE.MeshStandardMaterial({ color: '#ffffff', flatShading: true, roughness: 0.85 }), this.fog, fogOpts);
-    const trunkMat = patchTileMaterial(new THREE.MeshStandardMaterial({ color: '#6A4A33', flatShading: true, roughness: 0.9 }), this.fog, fogOpts);
-    pines.material = leafMat1;
-    rounds.material = leafMat2;
-    trunks.material = trunkMat;
+    // one material for leaves and trunks: the trunk colour comes from the shader
+    const mat = patchTileMaterial(this.material({ color: '#ffffff', flatShading: true, roughness: 0.85 }), this.fog, { ...fogOpts, trunkColor: TRUNK_COLOR });
+    t.disposables.push(mat);
+
+    const species = [
+      { geo: this.pineGeo, m: new Float32Array(max * 16), c: new Float32Array(max * 3), k: new Uint8Array(max), n: 0 },
+      { geo: this.roundGeo, m: new Float32Array(max * 16), c: new Float32Array(max * 3), k: new Uint8Array(max), n: 0 },
+    ];
     const mtx = new THREE.Matrix4();
     const quat = new THREE.Quaternion();
     const scl = new THREE.Vector3();
     const p = new THREE.Vector3();
     const col = new THREE.Color();
     const up = new THREE.Vector3(0, 1, 0);
-    let np = 0;
-    let nr = 0;
-    let nt = 0;
     const attempts = max * 4;
-    for (let a = 0; a < attempts && np + nr < max; a++) {
+    for (let a = 0; a < attempts && species[0].n + species[1].n < max; a++) {
       const u = rand();
       const v = rand();
       const di = Math.min(127, Math.floor(u * 128));
@@ -632,40 +833,54 @@ export class TileManager {
       scl.set(s, s * (0.85 + rand() * 0.4), s);
       mtx.compose(p, quat, scl);
       col.set(TREES.colors[Math.floor(rand() * TREES.colors.length)]).offsetHSL(0, 0, (rand() - 0.5) * 0.06);
-      if (rand() < TREES.pineShare) {
-        pines.setMatrixAt(np, mtx);
-        pines.setColorAt(np, col);
-        np++;
-      } else {
-        rounds.setMatrixAt(nr, mtx);
-        rounds.setColorAt(nr, col);
-        nr++;
+      const sp = rand() < TREES.pineShare ? species[0] : species[1];
+      mtx.toArray(sp.m, sp.n * 16);
+      col.toArray(sp.c, sp.n * 3);
+      sp.k[sp.n] = Math.min(C - 1, Math.floor(v * C)) * C + Math.min(C - 1, Math.floor(u * C));
+      sp.n++;
+    }
+
+    // one instanced mesh per species per chunk, sized to exactly the trees in it
+    for (const sp of species) {
+      const counts = new Uint32Array(C * C);
+      for (let i = 0; i < sp.n; i++) counts[sp.k[i]]++;
+      for (let chunk = 0; chunk < C * C; chunk++) {
+        const n = counts[chunk];
+        if (!n) continue;
+        const im = new THREE.InstancedMesh(sp.geo, mat, n);
+        const colors = new Float32Array(n * 3);
+        const mats = im.instanceMatrix.array;
+        let w = 0;
+        for (let i = 0; i < sp.n; i++) {
+          if (sp.k[i] !== chunk) continue;
+          mats.set(sp.m.subarray(i * 16, i * 16 + 16), w * 16);
+          colors.set(sp.c.subarray(i * 3, i * 3 + 3), w * 3);
+          w++;
+        }
+        im.instanceColor = new THREE.InstancedBufferAttribute(colors, 3);
+        im.computeBoundingSphere(); // lets the camera and shadow pass skip off-screen chunks
+        im.castShadow = q.shadows;
+        im.receiveShadow = q.shadows;
+        this.addChunk(t, im, chunk % C, Math.floor(chunk / C), 'tree');
+        t.disposables.push(im);
       }
-      trunks.setMatrixAt(nt++, mtx);
     }
-    pines.count = np;
-    rounds.count = nr;
-    trunks.count = nt;
-    for (const im of [pines, rounds, trunks]) {
-      im.castShadow = q.shadows;
-      im.receiveShadow = q.shadows;
-      im.frustumCulled = false; // instances spread over the whole tile
-      if (im.count > 0) t.group.add(im);
-    }
-    t.disposables.push(leafMat1, leafMat2, trunkMat, pines, rounds, trunks);
   }
 
   async buildBuildings(t, vt, rand, fogOpts) {
     const layer = vt.layers.building;
     if (!layer) return;
+    const q = this.quality;
     const tm = this.proj.tileMeters;
+    const C = CONFIG.chunksPerTile;
     const ext = layer.extent || 4096;
     const k = tm / ext;
-    const geoms = [];
+    const bufs = new Array(C * C).fill(null);
     const wall = new THREE.Color();
     const roof = new THREE.Color();
-    for (let i = 0; i < layer.length && geoms.length < this.quality.buildings; i++) {
-      if (i % 300 === 299) {
+    let count = 0;
+    outer: for (let i = 0; i < layer.length; i++) {
+      if (i % 400 === 399) {
         await nextFrame();
         if (t.cancelled) return;
       }
@@ -688,43 +903,36 @@ export class TileManager {
         const areaM2 = Math.abs(ringArea(ring)) * k * k;
         if (areaM2 < BUILDING.minArea) continue;
 
-        const pts = ring.map((pt) => new THREE.Vector2(pt.x * k, -pt.y * k));
-        const shape = new THREE.Shape(pts);
         const h = clamp(Number(props.render_height) || BUILDING.defaultHeight, BUILDING.minHeight, BUILDING.maxHeight);
         let base = Infinity;
         for (const pt of ring) base = Math.min(base, this.sampleGrid(t, pt.x / ext, pt.y / ext));
-        let g;
-        try {
-          g = new THREE.ExtrudeGeometry(shape, { depth: h + 1, bevelEnabled: false });
-        } catch {
-          continue; // broken footprint in the source data
-        }
-        g.rotateX(-Math.PI / 2);
-        g.translate(0, base - 1, 0);
         wall.set(BUILDING.walls[Math.floor(rand() * BUILDING.walls.length)]);
         roof.set(BUILDING.roofs[Math.floor(rand() * BUILDING.roofs.length)]);
-        const nrm = g.attributes.normal;
-        const colors = new Float32Array(nrm.count * 3);
-        for (let v = 0; v < nrm.count; v++) {
-          const c = nrm.getY(v) > 0.5 ? roof : wall;
-          colors[v * 3] = c.r;
-          colors[v * 3 + 1] = c.g;
-          colors[v * 3 + 2] = c.b;
-        }
-        g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-        geoms.push(g);
+
+        const chunk = Math.min(C - 1, Math.floor((cy / ext) * C)) * C + Math.min(C - 1, Math.floor((cx / ext) * C));
+        const buf = bufs[chunk] || (bufs[chunk] = new BuildingBuffer(q.shadows));
+        const pts = ring.map((pt) => ({ x: pt.x * k, z: pt.y * k }));
+        if (buf.add(pts, base - 1, base + h, wall, roof, triangulate) && ++count >= q.buildings) break outer;
       }
     }
-    if (!geoms.length) return;
-    const merged = mergeGeometries(geoms, false);
-    for (const g of geoms) g.dispose();
-    if (!merged) return;
-    const mat = patchTileMaterial(new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.8 }), this.fog, fogOpts);
-    const mesh = new THREE.Mesh(merged, mat);
-    mesh.castShadow = this.quality.shadows;
-    mesh.receiveShadow = this.quality.shadows;
-    t.group.add(mesh);
-    t.disposables.push(merged, mat);
+    if (!count) return;
+
+    const mat = patchTileMaterial(this.material({ vertexColors: true, flatShading: true, roughness: 0.8 }), this.fog, fogOpts);
+    t.disposables.push(mat);
+    bufs.forEach((buf, chunk) => {
+      if (!buf || !buf.n) return;
+      const a = buf.arrays();
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(a.position, 3));
+      g.setAttribute('color', new THREE.BufferAttribute(a.color, 3));
+      if (a.normal) g.setAttribute('normal', new THREE.BufferAttribute(a.normal, 3));
+      g.computeBoundingSphere();
+      const mesh = new THREE.Mesh(g, mat);
+      mesh.castShadow = q.shadows;
+      mesh.receiveShadow = q.shadows;
+      this.addChunk(t, mesh, chunk % C, Math.floor(chunk / C), 'building');
+      t.disposables.push(g);
+    });
   }
 
   collectPlaces(t, vt) {

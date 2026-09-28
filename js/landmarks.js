@@ -7,6 +7,12 @@ import { escapeHtml } from './util.js';
 
 const S = 3; // crystal scale in metres
 
+// Looks of each status. Open crystals use their rarity colour.
+const LOOK = {
+  mystery: { color: '#6D6696', emissive: '#3A3470', intensity: 0.5, ring: '#6D6696' },
+  claimed: { color: '#AFC0CC', emissive: '#5E7A8C', intensity: 0.4, ring: '#7F95A6' },
+};
+
 function beamMaterial(color, time) {
   return new THREE.ShaderMaterial({
     uniforms: { uColor: { value: new THREE.Color(color) }, uTime: time, uAlpha: { value: 0.5 } },
@@ -30,12 +36,26 @@ export class Landmarks {
     this.crysGeo = new THREE.OctahedronGeometry(1.35, 0);
     this.beamGeo = new THREE.CylinderGeometry(1.5, 4.5, 170, 16, 1, true);
     this.ringGeo = new THREE.RingGeometry(2.6, 3.1, 48);
-    this.beamMats = new Map();
+    // Materials are shared by every crystal with the same look (a handful in total)
+    // instead of two new materials per crystal.
+    this.mats = new Map();
+    this.tmp = new THREE.Vector3();
+    this.shown = [];
   }
 
-  beam(color) {
-    if (!this.beamMats.has(color)) this.beamMats.set(color, beamMaterial(color, this.fog.uniforms.uTime));
-    return this.beamMats.get(color);
+  materials(status, color) {
+    const key = status === 'open' ? `open|${color}` : status;
+    let m = this.mats.get(key);
+    if (!m) {
+      const look = LOOK[status] || { color, emissive: color, intensity: 1.3, ring: color };
+      m = {
+        crystal: new THREE.MeshStandardMaterial({ color: look.color, emissive: look.emissive, emissiveIntensity: look.intensity, roughness: 0.25, flatShading: true }),
+        ring: new THREE.MeshBasicMaterial({ color: look.ring, transparent: true, opacity: 0.7, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false }),
+        beam: status === 'open' ? beamMaterial(color, this.fog.uniforms.uTime) : null,
+      };
+      this.mats.set(key, m);
+    }
+    return m;
   }
 
   add(tileKey, places) {
@@ -51,18 +71,17 @@ export class Landmarks {
       ped.position.y = 0.35;
       ped.castShadow = true;
       body.add(ped);
-      const cmat = new THREE.MeshStandardMaterial({ color: p.color, emissive: p.color, emissiveIntensity: 1.3, roughness: 0.25, flatShading: true });
-      const crystal = new THREE.Mesh(this.crysGeo, cmat);
+      const open = this.materials('open', p.color);
+      const crystal = new THREE.Mesh(this.crysGeo, open.crystal);
       crystal.scale.set(1, 1.55, 1);
       crystal.position.y = 4;
       crystal.castShadow = true;
       body.add(crystal);
-      const ringMat = new THREE.MeshBasicMaterial({ color: p.color, transparent: true, opacity: 0.7, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false });
-      const ring = new THREE.Mesh(this.ringGeo, ringMat);
+      const ring = new THREE.Mesh(this.ringGeo, open.ring);
       ring.rotation.x = -Math.PI / 2;
       ring.position.y = 0.78;
       body.add(ring);
-      const beam = new THREE.Mesh(this.beamGeo, this.beam(p.color));
+      const beam = new THREE.Mesh(this.beamGeo, open.beam);
       beam.position.y = 85 + 3;
       g.add(beam);
       this.scene.add(g);
@@ -72,7 +91,11 @@ export class Landmarks {
       el.style.display = 'none';
       this.labelsEl.appendChild(el);
 
-      const item = { p, g, body, crystal, cmat, ring, ringMat, beam, el, status: '', labelHtml: '', tileKey };
+      const item = {
+        p, g, body, crystal, ring, beam, el, status: '', labelHtml: '', labelCls: '', tileKey,
+        fogCell: this.fog.cell(p.x, p.z), // where to read this place's fog, found once
+        css: { display: 'none', opacity: '', transform: '' }, // last values written to the label
+      };
       crystal.userData.item = item;
       this.items.set(p.id, item);
       ids.push(p.id);
@@ -86,8 +109,6 @@ export class Landmarks {
       const it = this.items.get(id);
       if (!it) continue;
       this.scene.remove(it.g);
-      it.cmat.dispose();
-      it.ringMat.dispose();
       it.el.remove();
       this.items.delete(id);
     }
@@ -101,31 +122,21 @@ export class Landmarks {
 
   statusFor(item) {
     if (this.isOnCooldown(item.p.id)) return 'claimed';
-    return this.fog.at(item.p.x, item.p.z) > 0.45 ? 'open' : 'mystery';
+    const c = item.fogCell;
+    return c.grid[c.idx] > 0.45 * 255 ? 'open' : 'mystery';
   }
 
   setStatus(item, status, silent = false) {
     if (item.status === status) return;
     item.status = status;
-    const c = item.p.color;
-    if (status === 'mystery') {
-      item.cmat.color.set('#6D6696');
-      item.cmat.emissive.set('#3A3470');
-      item.cmat.emissiveIntensity = 0.5;
-      item.ringMat.color.set('#6D6696');
-      item.beam.visible = false;
-    } else if (status === 'open') {
-      item.cmat.color.set(c);
-      item.cmat.emissive.set(c);
-      item.cmat.emissiveIntensity = 1.3;
-      item.ringMat.color.set(c);
+    const m = this.materials(status, item.p.color);
+    item.crystal.material = m.crystal;
+    item.ring.material = m.ring;
+    if (status === 'open') {
+      item.beam.material = m.beam;
       item.beam.visible = true;
       if (!silent && this.onDiscover) this.onDiscover(item);
     } else {
-      item.cmat.color.set('#AFC0CC');
-      item.cmat.emissive.set('#5E7A8C');
-      item.cmat.emissiveIntensity = 0.4;
-      item.ringMat.color.set('#7F95A6');
       item.beam.visible = false;
     }
     this.renderLabel(item);
@@ -147,7 +158,10 @@ export class Landmarks {
       item.el.innerHTML = html;
       item.labelHtml = html;
     }
-    item.el.className = cls;
+    if (cls !== item.labelCls) {
+      item.el.className = cls;
+      item.labelCls = cls;
+    }
   }
 
   claim(item) {
@@ -155,37 +169,60 @@ export class Landmarks {
     this.setStatus(item, 'claimed');
   }
 
-  update(dt, t, player, camera) {
-    const tmp = new THREE.Vector3();
-    const shown = [];
+  // Label styles are only written when they change, so a still camera costs no DOM work.
+  css(it, display, opacity, transform) {
+    const c = it.css;
+    const s = it.el.style;
+    if (c.display !== display) s.display = c.display = display;
+    if (display === 'none') return;
+    if (c.opacity !== opacity) s.opacity = c.opacity = opacity;
+    if (c.transform !== transform) s.transform = c.transform = transform;
+  }
+
+  update(dt, t, player, camera, showLabels = true) {
+    const tmp = this.tmp;
+    const shown = this.shown;
+    shown.length = 0;
+    const W = innerWidth;
+    const H = innerHeight;
     for (const it of this.items.values()) {
-      it.crystal.rotation.y += dt * (it.status === 'open' ? 1.4 : 0.5);
-      it.crystal.position.y = 4 + Math.sin(t * 2 + it.p.x * 0.01) * 0.35;
-      it.ring.scale.setScalar(1 + Math.sin(t * 3 + it.p.z * 0.01) * 0.06);
       const st = this.statusFor(it);
       if (st !== it.status) this.setStatus(it, st);
       const d = Math.hypot(it.p.x - player.x, it.p.z - player.z);
+      // far crystals are a few pixels tall: skip their meshes, keep the beam
+      const near = d < CONFIG.crystalDrawDistance;
+      it.body.visible = near;
+      if (near) {
+        it.crystal.rotation.y += dt * (it.status === 'open' ? 1.4 : 0.5);
+        it.crystal.position.y = 4 + Math.sin(t * 2 + it.p.x * 0.01) * 0.35;
+        it.ring.scale.setScalar(1 + Math.sin(t * 3 + it.p.z * 0.01) * 0.06);
+      }
       const limit = it.status === 'mystery' ? CONFIG.labelDistance * 0.45 : CONFIG.labelDistance;
-      if (d < limit) shown.push({ it, d });
-      else it.el.style.display = 'none';
+      if (showLabels && d < limit) {
+        it.dist = d;
+        shown.push(it);
+      } else this.css(it, 'none');
     }
-    shown.sort((a, b) => a.d - b.d);
-    shown.forEach(({ it, d }, idx) => {
+    if (!showLabels) return;
+    shown.sort((a, b) => a.dist - b.dist);
+    for (let idx = 0; idx < shown.length; idx++) {
+      const it = shown[idx];
+      const d = it.dist;
       if (idx >= CONFIG.maxLabels) {
-        it.el.style.display = 'none';
-        return;
+        this.css(it, 'none');
+        continue;
       }
       tmp.set(it.p.x, it.p.y + 8 * S, it.p.z).project(camera);
       if (tmp.z > 1 || Math.abs(tmp.x) > 1.15 || Math.abs(tmp.y) > 1.15) {
-        it.el.style.display = 'none';
-        return;
+        this.css(it, 'none');
+        continue;
       }
-      const x = (tmp.x * 0.5 + 0.5) * innerWidth;
-      const y = (-tmp.y * 0.5 + 0.5) * innerHeight;
-      it.el.style.display = '';
-      it.el.style.opacity = String(Math.max(0.35, 1.3 - d / CONFIG.labelDistance));
-      it.el.style.transform = `translate(${x}px,${y}px) translate(-50%,-100%) scale(${Math.max(0.72, 1.12 - d / 2000)})`;
-    });
+      const x = Math.round((tmp.x * 0.5 + 0.5) * W * 2) / 2;
+      const y = Math.round((-tmp.y * 0.5 + 0.5) * H * 2) / 2;
+      const opacity = String(Math.round(Math.max(0.35, 1.3 - d / CONFIG.labelDistance) * 50) / 50);
+      const scale = Math.round(Math.max(0.72, 1.12 - d / 2000) * 100) / 100;
+      this.css(it, '', opacity, `translate(${x}px,${y}px) translate(-50%,-100%) scale(${scale})`);
+    }
   }
 
   nearest(player, radius, filter) {
@@ -209,6 +246,8 @@ export class Landmarks {
   }
 
   crystals() {
-    return [...this.items.values()].map((it) => it.crystal);
+    const out = [];
+    for (const it of this.items.values()) if (it.body.visible) out.push(it.crystal);
+    return out;
   }
 }

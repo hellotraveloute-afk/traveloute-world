@@ -46,6 +46,8 @@ Then do step 5 above.
 - Jump straight to a place: `...github.io/traveloute-world/?place=ella` (also `ninearch`, `haputale`, `galle`, `kandy`, `sigiriya`, `colombo`, `mirissa`).
 - Any coordinates: `?lat=6.8667&lon=81.0466`
 - Force graphics quality: `?quality=low` (battery saver) or `?quality=high`. Combine with `&`, e.g. `?place=galle&quality=low`.
+- Cap the frame rate: `?fps=30` (default 60; stops 90/120 Hz screens drawing frames nobody needs).
+- Turn off automatic quality steps, for measuring a phone honestly: `?adaptive=0`.
 
 ## Run it on your computer
 
@@ -77,10 +79,15 @@ js/world.js       renderer, sky, lights, time of day, bloom
 js/avatar.js      low-poly explorer avatars
 js/geo.js         latitude/longitude ↔ tiles ↔ metres
 js/config.js      technical settings, start presets, graphics quality
+js/perf.js        automatic quality steps and the frame-rate cap
+js/extrude.js     fast building extrusion (walls + roofs straight into buffers)
+js/net.js         caches downloaded tiles on the device
 js/hud.js         toasts, rewards, stamp modal, sheets, sound
 js/storage.js     saving progress in the browser
 docs/PLAN.md      the master plan
 docs/BRIDGE.md    the app bridge protocol
+docs/PERFORMANCE.md  what makes it fast, budgets, and how to measure
+tools/test/       Node tests for the tile pipeline (no browser needed): tools/test/run.sh
 ```
 
 ## Changing how the world looks
@@ -107,7 +114,7 @@ Commit the change and GitHub Pages updates the live link within a minute or two.
 - No other players, gatherings or crews yet (phases 4–5).
 - Famous landmarks use generic crystals; custom models come later.
 - How rich an area looks depends on OpenStreetMap coverage there.
-- Performance on budget phones is exactly what phase 2 will measure. If it's slow, try `?quality=low`.
+- Performance on budget phones is exactly what phase 2 will measure. See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). If it's slow, try `?quality=low`.
 
 ## If something doesn't work
 

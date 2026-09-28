@@ -8,18 +8,29 @@
   <meta name="description" content="A game world built from the real map. Explore, uncover the fog, and claim stars at real places.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Nunito:wght@600;700;800;900&display=swap">
+  <!-- fonts load without blocking the first frame; system fonts are used until they arrive -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Nunito:wght@600;700;800;900&display=swap" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Nunito:wght@600;700;800;900&display=swap"></noscript>
   <link rel="stylesheet" href="css/style.css">
   <script type="importmap">
   {
     "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js",
       "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
       "pbf": "https://cdn.jsdelivr.net/npm/pbf@3.2.1/+esm",
       "@mapbox/vector-tile": "https://cdn.jsdelivr.net/npm/@mapbox/vector-tile@1.3.1/+esm"
     }
   }
   </script>
+  <!-- start downloading the engine and game code in parallel instead of one import at a time -->
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js" crossorigin>
+  <link rel="modulepreload" href="js/main.js">
+  <link rel="modulepreload" href="js/world.js">
+  <link rel="modulepreload" href="js/tiles.js">
+  <link rel="modulepreload" href="js/fog.js">
+  <link rel="modulepreload" href="js/landmarks.js">
+  <link rel="modulepreload" href="js/perf.js">
 </head>
 <body>
 <div id="app">

@@ -17,16 +17,18 @@ import { GAMEPLAY, TIMES, timeIndexForHour, titleFor } from './rules.js';
 import { store } from './storage.js';
 import * as hud from './hud.js';
 import * as bridge from './bridge.js';
+import { QualityGovernor, makeFrameCap } from './perf.js';
 import { clamp, lerp, fmt, escapeHtml } from './util.js';
 
 const $ = hud.$;
 const EMBED = bridge.EMBED;
 let quality = detectQuality();
+document.body.classList.toggle('low-gfx', quality.level === 'low');
 const profile = store.get('profile', { stars: 0, xp: 0, level: 1, stamps: [] });
 // In the app, claims (and their cooldowns) come from the app with `setClaimed`.
 const claims = EMBED ? {} : store.get('claims', {});
 
-let proj, fog, world, tiles, landmarks, player;
+let proj, fog, world, tiles, landmarks, player, governor, frameDue;
 let mode = 'explore';
 let timeIndex = 1;
 let gpsWatch = null;
@@ -110,11 +112,13 @@ function renderStart() {
 
 /* ======================================================= session */
 
-async function startSession(lat, lon, startMode, qualityOverride) {
+async function startSession(lat, lon, startMode, qualityOverride, qualityExtra) {
   if (started) return;
   started = true;
   mode = startMode;
-  if (qualityOverride) quality = detectQuality(qualityOverride);
+  if (qualityOverride || qualityExtra) quality = detectQuality(qualityOverride, qualityExtra);
+  document.body.classList.toggle('low-gfx', quality.level === 'low');
+  frameDue = makeFrameCap(quality.maxFps);
   $('#start').hidden = true;
   $('#loader').hidden = false;
   $('#loaderText').textContent = 'Downloading the map around you…';
@@ -142,6 +146,7 @@ async function startSession(lat, lon, startMode, qualityOverride) {
   });
   tiles = new TileManager({
     scene: world.scene,
+    renderer: world.renderer,
     proj,
     quality,
     fog,
@@ -156,6 +161,12 @@ async function startSession(lat, lon, startMode, qualityOverride) {
       }
     },
     onError: (message) => EMBED && bridge.send({ type: 'error', message }),
+  });
+  governor = new QualityGovernor({ world, quality });
+  // Mobile browsers can drop the GPU context (e.g. in the background). three.js
+  // recovers its own state; tiles are rebuilt because their canvases were freed.
+  world.renderer.domElement.addEventListener('webglcontextrestored', () => {
+    if (player) tiles.rebuildAll(player.position.x, player.position.z);
   });
   const hasMap = await tiles.init();
 
@@ -378,10 +389,8 @@ function tapAt(x, y) {
     if (EMBED) bridge.send({ type: 'placeTapped', place: bridge.placeJson(item) });
     target = new THREE.Vector3(item.p.x + 6, 0, item.p.z + 6);
   } else {
-    const meshes = [...tiles.tiles.values()].filter((t) => t.terrain && t.state === 'ready').map((t) => t.terrain);
-    const hit = raycaster.intersectObjects(meshes, false)[0];
-    if (!hit) return;
-    target = hit.point;
+    target = tiles.raycastGround(raycaster.ray);
+    if (!target) return;
   }
   if (mode === 'gps') {
     if (!gpsTapHintShown && !EMBED) {
@@ -747,7 +756,7 @@ function reportFps(rawDt) {
   if (fpsStats.time >= 5) {
     const value = Math.round((fpsStats.frames / fpsStats.time) * 10) / 10;
     const min = Number.isFinite(fpsStats.min) ? Math.round(fpsStats.min * 10) / 10 : value;
-    bridge.send({ type: 'fps', value, min, quality: quality.level });
+    bridge.send({ type: 'fps', value, min, quality: quality.level, pixelRatio: Math.round(world.pixelRatio * 100) / 100, tier: governor ? governor.tier : 0 });
     fpsStats.frames = 0;
     fpsStats.time = 0;
     fpsStats.min = Infinity;
@@ -765,10 +774,9 @@ function updatePlayer(dt, t) {
   if (mode === 'explore' && keys.size) {
     const fx = -Math.sin(cam.yaw);
     const fz = -Math.cos(cam.yaw);
-    if (keys.has('w') || keys.has('arrowup')) tmpDir.add(new THREE.Vector3(fx, 0, fz));
-    if (keys.has('s') || keys.has('arrowdown')) tmpDir.sub(new THREE.Vector3(fx, 0, fz));
-    if (keys.has('d') || keys.has('arrowright')) tmpDir.add(new THREE.Vector3(-fz, 0, fx));
-    if (keys.has('a') || keys.has('arrowleft')) tmpDir.sub(new THREE.Vector3(-fz, 0, fx));
+    const f = (keys.has('w') || keys.has('arrowup') ? 1 : 0) - (keys.has('s') || keys.has('arrowdown') ? 1 : 0);
+    const r = (keys.has('d') || keys.has('arrowright') ? 1 : 0) - (keys.has('a') || keys.has('arrowleft') ? 1 : 0);
+    tmpDir.set(fx * f - fz * r, 0, fz * f + fx * r);
   } else if (mode === 'explore' && moveTarget) {
     tmpDir.set(moveTarget.x - player.position.x, 0, moveTarget.z - player.position.z);
     if (tmpDir.length() < 1.5) {
@@ -815,21 +823,42 @@ function updatePlayer(dt, t) {
   }
 }
 
+const camGoal = new THREE.Vector3();
+const camDesired = new THREE.Vector3();
+const compassIcon = $('#compassIcon');
+let compassYaw = NaN;
 function updateCamera(dt) {
-  cam.target.lerp(new THREE.Vector3(player.position.x, player.position.y + 6, player.position.z), Math.min(1, dt * 6));
+  camGoal.set(player.position.x, player.position.y + 6, player.position.z);
+  cam.target.lerp(camGoal, Math.min(1, dt * 6));
   const cp = Math.cos(cam.pitch);
-  const desired = new THREE.Vector3(
+  camDesired.set(
     cam.target.x + Math.sin(cam.yaw) * cp * cam.dist,
     cam.target.y + Math.sin(cam.pitch) * cam.dist,
     cam.target.z + Math.cos(cam.yaw) * cp * cam.dist
   );
-  const minY = tiles.heightAt(desired.x, desired.z) + 10;
-  if (desired.y < minY) desired.y = minY;
-  world.camera.position.lerp(desired, Math.min(1, dt * 8));
+  const minY = tiles.heightAt(camDesired.x, camDesired.z) + 10;
+  if (camDesired.y < minY) camDesired.y = minY;
+  world.camera.position.lerp(camDesired, Math.min(1, dt * 8));
   world.scene.fog.near = cam.dist + 300;
   world.scene.fog.far = cam.dist + 1800;
   world.camera.lookAt(cam.target);
-  $('#compassIcon').style.transform = `rotate(${(cam.yaw * 180) / Math.PI}deg)`;
+  if (!EMBED && cam.yaw !== compassYaw) {
+    compassYaw = cam.yaw;
+    compassIcon.style.transform = `rotate(${(cam.yaw * 180) / Math.PI}deg)`;
+  }
+}
+
+// Hides tree and building chunks that are too far to matter. Beyond the fog's
+// far distance everything is fully fogged anyway (x1.3 covers the screen corners,
+// where fog is thinner for the same distance).
+let cullTimer = 0;
+function updateCulling(dt) {
+  cullTimer += dt;
+  if (cullTimer < 0.2) return;
+  cullTimer = 0;
+  const far = world.scene.fog.far * 1.3;
+  const p = world.camera.position;
+  tiles.cull(p.x, p.z, Math.min(quality.treeDistance, far), far);
 }
 
 function updateScanRing(dt) {
@@ -844,7 +873,16 @@ function updateScanRing(dt) {
   scanRing.position.set(u.x, player.position.y + 3, u.z);
 }
 
-function frame() {
+// What the player is near changes slowly, so it is worked out 10 times a second.
+let ctxTimer = 0;
+let ctxNow = null;
+
+function frame(now) {
+  // frame-rate cap: skip animation frames that come sooner than needed
+  if (!frameDue(now)) {
+    requestAnimationFrame(frame);
+    return;
+  }
   const rawDt = clock.getDelta();
   const dt = Math.min(rawDt, 0.05);
   const t = clock.elapsedTime;
@@ -860,14 +898,20 @@ function frame() {
   updateScanRing(dt);
   world.updateTime(dt);
   updateCamera(dt);
+  updateCulling(dt);
   world.follow(player.position);
   if (hudLive) {
-    const ctx = currentContext();
+    ctxTimer += dt;
+    if (!ctxNow || ctxTimer >= 0.1) {
+      ctxTimer = 0;
+      ctxNow = currentContext();
+    }
     if (EMBED) {
-      reportContext(ctx);
+      reportContext(ctxNow);
       reportExplored(dt);
       reportFps(rawDt);
-    } else updateContext(ctx);
+    } else updateContext(ctxNow);
+    governor.update(rawDt, tiles.busy);
   }
   saveTimer += dt * 1000;
   if (saveTimer > CONFIG.fogSaveIntervalMs) {
@@ -898,7 +942,10 @@ function initEmbed() {
     }
     hud.ensureAudio();
     const q = m.quality === 'low' || m.quality === 'high' ? m.quality : undefined;
-    startSession(lat, lon, m.mode === 'gps' ? 'gps' : 'explore', q);
+    const extra = {};
+    if (typeof m.adaptive === 'boolean') extra.adaptive = m.adaptive;
+    if (Number.isFinite(m.maxFps)) extra.maxFps = m.maxFps;
+    startSession(lat, lon, m.mode === 'gps' ? 'gps' : 'explore', q, extra);
   });
   bridge.on('setPlayer', (m) => {
     const fix = { lat: Number(m.lat), lon: Number(m.lon), accuracyM: Number(m.accuracyM) };
